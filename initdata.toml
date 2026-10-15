@@ -1,0 +1,73 @@
+version = "0.1.0"
+algorithm = "sha384"
+[data]
+"policy.rego" = '''
+package agent_policy
+
+import future.keywords.if
+import future.keywords.in
+
+default SetPolicyRequest := false
+
+# Block exec by default
+default ExecProcessRequest := false
+
+allowed_images := [
+    "docker.io/prabhanjang/cvn-vllm-glm53flash@sha256:43e5f7ce60d8dbaf0080cb74b0f324953363a6f5d7bcc2fb6f2a6210ca14af26",
+]
+
+default PullImageRequest := false
+ 
+PullImageRequest if {
+    some img in allowed_images
+    input.image == img
+}
+
+# --- DENIED -----------------------------------------------------------------
+default WriteStreamRequest := false
+default ReseedRandomDevRequest := false
+default PauseContainerRequest := false
+default ResumeContainerRequest := false
+default AddSwapRequest := false
+default StartTracingRequest := false
+default StopTracingRequest := false
+default UpdateEphemeralMountsRequest := false
+default UpdateContainerRequest := false
+
+# --- ALLOWED: what a sandbox needs to live and die --------------------------
+default CreateSandboxRequest := true
+default DestroySandboxRequest := true
+default StartContainerRequest := true
+default RemoveContainerRequest := true
+default GuestDetailsRequest := true
+default StatsContainerRequest := true
+default CreateContainerRequest := true
+default ReadStreamRequest := true
+default CopyFileRequest := true
+default GetOOMEventRequest := true
+default WaitProcessRequest := true
+default SignalProcessRequest := true
+default CloseStdinRequest := true
+default TtyWinResizeRequest := true
+default OnlineCPUMemRequest := true
+default MemHotplugByProbeRequest := true
+default GetMetricsRequest := true
+default SetGuestDateTimeRequest := true
+default RemoveStaleVirtiofsShareMountsRequest := true
+default UpdateInterfaceRequest := true
+default UpdateRoutesRequest := true
+default ListInterfacesRequest := true
+default ListRoutesRequest := true
+default AddARPNeighborsRequest := true
+'''
+"aa.toml" = '''
+[token_configs.ccm_as]
+ccm_domain_names = ["fortanix.com"]
+'''
+"cdh.toml" = '''
+[kbc]
+name = "ccm_kbc"
+url = "https://apps.amer.smartkey.io"
+[kbc_configs.ccm_kbc]
+dsm_app_id = "22b1bc64-a371-438d-af30-d714dfc212cb"
+'''

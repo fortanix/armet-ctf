@@ -1,0 +1,8 @@
+# initdata.toml is the PREIMAGE of MRCONFIGID. Any byte git changes on the way
+# in or out changes the digest and breaks every verifier.
+#
+# -text disables end-of-line normalisation. Without it, a clone on Windows (or
+# any clone with core.autocrlf set) gets CRLF, sha384sum returns a different
+# value than the node reports, and the node looks like it is lying.
+initdata.toml -text -diff=auto
+* -text
