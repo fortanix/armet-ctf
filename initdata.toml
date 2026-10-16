@@ -34,16 +34,36 @@ default StopTracingRequest := false
 default UpdateEphemeralMountsRequest := false
 default UpdateContainerRequest := false
 
+default CopyFileRequest := false
+
+CopyFileRequest if {
+    not regex.match("(^|/)\\.\\.($|/)", input.path)
+    startswith(input.path, "/run/kata-containers/")
+    not startswith(input.symlink_target, "/")
+    not regex.match("(^|/)\\.\\.($|/)", input.symlink_target)
+}
+
+default CreateContainerRequest := false
+
+CreateContainerRequest if {
+    input.OCI.Process.Args == ["/opt/cvn/entrypoint.sh"]
+    input.OCI.Process.User.UID == 0
+}
+
+CreateContainerRequest if {
+    input.OCI.Process.Args == ["/pause"]
+    input.OCI.Process.User.UID == 65535
+}
+
+
 # --- ALLOWED: what a sandbox needs to live and die --------------------------
 default CreateSandboxRequest := true
 default DestroySandboxRequest := true
+default ReadStreamRequest := true
 default StartContainerRequest := true
 default RemoveContainerRequest := true
 default GuestDetailsRequest := true
 default StatsContainerRequest := true
-default CreateContainerRequest := true
-default ReadStreamRequest := true
-default CopyFileRequest := true
 default GetOOMEventRequest := true
 default WaitProcessRequest := true
 default SignalProcessRequest := true
