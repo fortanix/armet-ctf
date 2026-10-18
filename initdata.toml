@@ -13,7 +13,7 @@ default SetPolicyRequest := false
 default ExecProcessRequest := false
 
 allowed_images := [
-    "docker.io/prabhanjang/cvn-vllm-glm53flash@sha256:625f411195824963f5e5142e5508ada0c45d328a9cfba128ce4a82046c0139c8",
+    "docker.io/prabhanjang/cvn-vllm-glm53flash@sha256:9d0fda256d3bcfe8381f0fdc3fde5ef8e24a1cc12ded0ac20011d19a38916a09",
 ]
 
 default PullImageRequest := false

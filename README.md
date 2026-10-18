@@ -26,7 +26,7 @@ MRCONFIGID == SHA-384(initdata.toml)
 
 ```
 $ sha384sum initdata.toml
-67c5d284d87081811ce7262612d8bd5beaa2cfe0620d8fe8456f54d554847fa45eab6b9c2fd1e5995c9111e820c7ecf8  initdata.toml
+6f5e1772e33b2226886d34cca4177fde87f491da4d433de72970aded14beb250d65270251b446c90560855b7f979dc5d  initdata.toml
 ```
 
 This works because the host passes `initdata.toml` to the guest and the TD
@@ -41,11 +41,11 @@ measures **SHA-384 over those exact bytes** into `MRCONFIGID`.
 
 ```
 MRTD         c78e2b8b2f66207f3807d8d999f51e04f5eab8f7aa02614a86ddd81b61f4e79c5d7616664fcb190b8eaae2e26d60b12a
-RTMR0        484e310ac5245cc0549f6f61ff88d52125f34337b74c8c761f9a9ead9791fb85cf8faf58d35ab1d788dc8b238457db14
+RTMR0        cfdae1db22a9f72f220b732a7de45bd5295a568451ee5309906c248dd70cde858adbd7693542bfd5edf3e0eed56a88b7
 RTMR1        b767cba3ab019c2c8a9027f87bd81074dcad56e8332d3b5df71edc37fced2915574cf79389aa86922a6e41aa512d26e3
 RTMR2        fffc07f5a1762199c0b9c03822dce398ec5737452fdf079636fa7898829d9f9b09bf7666eddf4c73b04171b3dc199d8d
 RTMR3        000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-MRCONFIGID   67c5d284d87081811ce7262612d8bd5beaa2cfe0620d8fe8456f54d554847fa45eab6b9c2fd1e5995c9111e820c7ecf8
+MRCONFIGID   6f5e1772e33b2226886d34cca4177fde87f491da4d433de72970aded14beb250d65270251b446c90560855b7f979dc5d
 ```
 
 | register | meaning |
@@ -76,7 +76,7 @@ configured, and `RTMR1`/`RTMR2` fix what they are.
 ## Image
 
 ```
-docker.io/prabhanjang/cvn-vllm-glm53flash@sha256:625f411195824963f5e5142e5508ada0c45d328a9cfba128ce4a82046c0139c8
+docker.io/prabhanjang/cvn-vllm-glm53flash@sha256:9d0fda256d3bcfe8381f0fdc3fde5ef8e24a1cc12ded0ac20011d19a38916a09
 ```
 
 Two of the image's layers are **encrypted**, and that is checkable by anyone
@@ -84,7 +84,7 @@ without credentials to this node:
 
 ```
 TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:prabhanjang/cvn-vllm-glm53flash:pull" | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
-curl -s -H "Authorization: Bearer $TOKEN"   -H 'Accept: application/vnd.oci.image.manifest.v1+json'   "https://registry-1.docker.io/v2/prabhanjang/cvn-vllm-glm53flash/manifests/sha256:625f411195824963f5e5142e5508ada0c45d328a9cfba128ce4a82046c0139c8"   | python3 -c 'import sys,json; m=json.load(sys.stdin); print("layers", len(m["layers"]), "encrypted at", [i for i,l in enumerate(m["layers"]) if "enc" in l["mediaType"]])'
+curl -s -H "Authorization: Bearer $TOKEN"   -H 'Accept: application/vnd.oci.image.manifest.v1+json'   "https://registry-1.docker.io/v2/prabhanjang/cvn-vllm-glm53flash/manifests/sha256:9d0fda256d3bcfe8381f0fdc3fde5ef8e24a1cc12ded0ac20011d19a38916a09"   | python3 -c 'import sys,json; m=json.load(sys.stdin); print("layers", len(m["layers"]), "encrypted at", [i for i,l in enumerate(m["layers"]) if "enc" in l["mediaType"]])'
 ```
 
 The decryption key lives in a Fortanix DSM security object and is released
