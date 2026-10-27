@@ -1,65 +1,385 @@
 version = "0.1.0"
-algorithm = "sha384"
+algorithm = "sha256"
 [data]
 "policy.rego" = '''
 package agent_policy
 
 import future.keywords.if
 import future.keywords.in
-
-default SetPolicyRequest := false
-
-# Block exec by default
-default ExecProcessRequest := false
+import future.keywords.every
 
 allowed_images := [
     "docker.io/prabhanjang/cvn-vllm-glm53flash@sha256:9d0fda256d3bcfe8381f0fdc3fde5ef8e24a1cc12ded0ac20011d19a38916a09",
 ]
 
+workload_argv := ["/opt/cvn/entrypoint.sh"]
+workload_uid := 0
+
+
+workload_env := {
+    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "CVN_WORKLOAD_NAME=cvn-vllm-glm53",
+    "CVN_LOG_LEVEL=info",
+    "CVN_LISTEN_PORT=8080",
+}
+
+
+platform_env_patterns := [
+    `^HOSTNAME=[a-zA-Z0-9][a-zA-Z0-9.-]{0,62}$`,
+    `^KUBERNETES_SERVICE_HOST=[0-9.]+$`,
+    `^KUBERNETES_SERVICE_PORT(_HTTPS)?=[0-9]+$`,
+    `^KUBERNETES_PORT=tcp://[0-9.]+:[0-9]+$`,
+    `^KUBERNETES_PORT_443_TCP(_PROTO=tcp|_PORT=443|_ADDR=[0-9.]+|=tcp://[0-9.]+:443)$`,
+    `^TERM=[a-z0-9-]+$`,
+]
+
+default_caps := {
+    "CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FSETID", "CAP_FOWNER", "CAP_MKNOD",
+    "CAP_NET_RAW", "CAP_SETGID", "CAP_SETUID", "CAP_SETFCAP", "CAP_SETPCAP",
+    "CAP_NET_BIND_SERVICE", "CAP_SYS_CHROOT", "CAP_KILL", "CAP_AUDIT_WRITE",
+}
+
+masked_paths := {
+    "/proc/acpi", "/proc/asound", "/proc/interrupts", "/proc/kcore",
+    "/proc/keys", "/proc/latency_stats", "/proc/timer_list",
+    "/proc/timer_stats", "/proc/sched_debug", "/proc/scsi",
+    "/sys/firmware", "/sys/devices/virtual/powercap",
+}
+
+readonly_paths := {
+    "/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger",
+}
+
+workload_sysctl := {}
+pause_sysctl := {
+    "net.ipv4.ip_unprivileged_port_start": "0",
+    "net.ipv4.ping_group_range": "0 2147483647",
+}
+
+# The complete mount table for the workload. Each row fixes the destination,
+# the filesystem type, the permitted source path and the exact option set. A
+# mount absent from the table, or differing in one option, is refused.
+workload_mounts := [
+    {"destination": "/proc",       "type": "proc",   "source": `^proc$`,   "options": {"nosuid", "noexec", "nodev"}},
+    {"destination": "/dev",        "type": "tmpfs",  "source": `^tmpfs$`,  "options": {"nosuid", "strictatime", "mode=755", "size=65536k"}},
+    {"destination": "/dev/pts",    "type": "devpts", "source": `^devpts$`, "options": {"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620", "gid=5"}},
+    {"destination": "/dev/shm",    "type": "bind",   "source": `^/run/kata-containers/sandbox/shm$`, "options": {"rbind"}},
+    {"destination": "/dev/mqueue", "type": "mqueue", "source": `^mqueue$`, "options": {"nosuid", "noexec", "nodev"}},
+    {"destination": "/sys",        "type": "sysfs",  "source": `^sysfs$`,  "options": {"nosuid", "noexec", "nodev", "ro"}},
+
+    {"destination": "/sys/fs/cgroup", "type": "cgroup", "source": `^cgroup$`, "options": {"nosuid", "noexec", "nodev", "relatime", "ro"}},
+    {"destination": "/sys/fs/cgroup", "type": "cgroup", "source": `^cgroup$`, "options": {"nosuid", "noexec", "nodev", "relatime", "ro", "nsdelegate"}},
+    {"destination": "/sys/fs/cgroup", "type": "cgroup", "source": `^cgroup$`, "options": {"nosuid", "noexec", "nodev", "relatime", "ro", "memory_recursiveprot"}},
+    {"destination": "/sys/fs/cgroup", "type": "cgroup", "source": `^cgroup$`, "options": {"nosuid", "noexec", "nodev", "relatime", "ro", "nsdelegate", "memory_recursiveprot"}},
+
+    {"destination": "/etc/hosts",           "type": "bind", "source": `^/run/kata-containers/shared/containers(?:/passthrough)?/(watchable/)?[a-f0-9]{64}-[a-z0-9]{16}-hosts$`,           "options": {"rbind", "rprivate", "rw"}},
+    {"destination": "/etc/hostname",        "type": "bind", "source": `^/run/kata-containers/shared/containers(?:/passthrough)?/(watchable/)?[a-f0-9]{64}-[a-z0-9]{16}-hostname$`,        "options": {"rbind", "rprivate", "rw"}},
+    {"destination": "/etc/resolv.conf",     "type": "bind", "source": `^/run/kata-containers/shared/containers(?:/passthrough)?/(watchable/)?[a-f0-9]{64}-[a-z0-9]{16}-resolv\.conf$`,    "options": {"rbind", "rprivate", "rw"}},
+    {"destination": "/dev/termination-log", "type": "bind", "source": `^/run/kata-containers/shared/containers(?:/passthrough)?/(watchable/)?[a-f0-9]{64}-[a-z0-9]{16}-termination-log$`, "options": {"rbind", "rprivate", "rw"}},
+]
+
+# The complete mount table for the sandbox container. It is NOT the workload's:
+# it has no control-group mount, and its resolver file is mounted read-only
+# with different options.
+pause_mounts := [
+    {"destination": "/proc",       "type": "proc",   "source": `^proc$`,   "options": {"nosuid", "noexec", "nodev"}},
+    {"destination": "/dev",        "type": "tmpfs",  "source": `^tmpfs$`,  "options": {"nosuid", "strictatime", "mode=755", "size=65536k"}},
+    {"destination": "/dev/pts",    "type": "devpts", "source": `^devpts$`, "options": {"nosuid", "noexec", "newinstance", "ptmxmode=0666", "mode=0620", "gid=5"}},
+    {"destination": "/dev/mqueue", "type": "mqueue", "source": `^mqueue$`, "options": {"nosuid", "noexec", "nodev"}},
+    {"destination": "/sys",        "type": "sysfs",  "source": `^sysfs$`,  "options": {"nosuid", "noexec", "nodev", "ro"}},
+    {"destination": "/dev/shm",    "type": "bind",   "source": `^/run/kata-containers/sandbox/shm$`, "options": {"rbind"}},
+    {"destination": "/etc/resolv.conf", "type": "bind", "source": `^/run/kata-containers/shared/containers(?:/passthrough)?/(watchable/)?[a-f0-9]{64}-[a-z0-9]{16}-resolv\.conf$`, "options": {"rbind", "ro", "nosuid", "nodev", "noexec"}},
+]
+
+protected_prefixes := [
+    "/opt/cvn", "/usr", "/lib", "/lib64", "/bin", "/sbin", "/root",
+    "/etc/ld.so.preload", "/etc/ld.so.conf", "/etc/ld.so.conf.d",
+    "/etc/passwd", "/etc/group", "/etc/shadow", "/etc/nsswitch.conf",
+]
+
+# Environment names that may never appear. The exact-environment rule already
+# refuses anything outside workload_env; this is a second barrier against an
+# error in that set. Each entry is a documented way to execute different code,
+# or to redirect what the attested code does, without altering the image.
+forbidden_env_prefixes := [
+    "LD_PRELOAD=", "LD_LIBRARY_PATH=", "LD_AUDIT=", "LD_PROFILE=",
+    "LD_DEBUG=", "LD_DEBUG_OUTPUT=", "LD_ORIGIN_PATH=", "GLIBC_TUNABLES=",
+    "PYTHONPATH=", "PYTHONSTARTUP=", "PYTHONHOME=", "PYTHONINSPECT=",
+    "PYTHONWARNINGS=", "PYTHONEXECUTABLE=", "PYTHONVERBOSE=",
+    "BASH_ENV=", "ENV=", "SHELLOPTS=", "BASHOPTS=", "PS4=", "IFS=",
+    "NODE_OPTIONS=", "NODE_PATH=", "PERL5LIB=", "PERL5OPT=", "PERLLIB=",
+    "RUBYOPT=", "RUBYLIB=", "JAVA_TOOL_OPTIONS=", "_JAVA_OPTIONS=",
+    "JDK_JAVA_OPTIONS=", "CLASSPATH=", "GCONV_PATH=", "LOCPATH=", "NLSPATH=",
+]
+
+is_workload if {
+    input.OCI.Process.Args == workload_argv
+    input.OCI.Process.User.UID == workload_uid
+    ctype == "container"
+}
+
+is_pause if {
+    input.OCI.Process.Args == ["/pause"]
+    input.OCI.Process.User.UID == 65535
+    ctype == "sandbox"
+}
+
+ctype := object.get(object.get(input.OCI, "Annotations", {}),
+                    "io.kubernetes.cri.container-type", "")
+
+default CreateContainerRequest := false
+
+CreateContainerRequest if {
+    is_workload
+    input.OCI.Process.Cwd == "/"
+    env_exact
+    no_forbidden_env
+    mounts_exact(workload_mounts)
+    no_protected_mounts
+    process_hardened
+    sysctl_exact(workload_sysctl)
+    root_readonly(false)
+    storages_safe
+    rootfs_bound
+    workload_rootfs_pinned
+}
+
+CreateContainerRequest if {
+    is_pause
+    input.OCI.Process.Cwd == "/"
+    pause_env_exact
+    no_forbidden_env
+    mounts_exact(pause_mounts)
+    no_protected_mounts
+    process_hardened
+    sysctl_exact(pause_sysctl)
+    root_readonly(true)
+    storages_safe
+    rootfs_bound
+    pause_rootfs_pinned
+}
+
+env_platform(e) if {
+    some p in platform_env_patterns
+    regex.match(p, e)
+}
+
+env_allowed(e) if e in workload_env
+env_allowed(e) if env_platform(e)
+
+env_exact if {
+    env := object.get(input.OCI.Process, "Env", [])
+    count(env) == count({e | some e in env})           # no repeated entry
+    every e in env { env_allowed(e) }                   # nothing added or altered
+    every w in workload_env { w in env }                # nothing removed
+    keys := [split(e, "=")[0] | some e in env]
+    count(keys) == count({k | some k in keys})          # one value per variable
+}
+
+pause_env_exact if {
+    object.get(input.OCI.Process, "Env", []) ==
+        ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]
+}
+
+no_forbidden_env if {
+    every e in object.get(input.OCI.Process, "Env", []) {
+        every f in forbidden_env_prefixes { not startswith(e, f) }
+    }
+}
+
+process_hardened if {
+    caps_exact
+    object.get(input.OCI, "Hooks", "set") == null
+    count(object.get(linux, "Devices", [])) == 0
+    count(object.get(input, "devices", [])) == 0
+    object.get(linux, "Seccomp", "set") == null
+    object.get(input.OCI.Process, "NoNewPrivileges", false) == true
+    object.get(input.OCI.Process, "Terminal", true) == false
+    count(object.get(input.OCI.Process, "Rlimits", ["x"])) == 0
+    paths_exact
+}
+
+linux := object.get(input.OCI, "Linux", {})
+
+caps_exact if {
+    c := object.get(input.OCI.Process, "Capabilities", {})
+    count(object.get(c, "Ambient", ["x"])) == 0
+    count(object.get(c, "Inheritable", ["x"])) == 0
+    {x | some x in object.get(c, "Bounding", [])} == default_caps
+    {x | some x in object.get(c, "Effective", [])} == default_caps
+    {x | some x in object.get(c, "Permitted", [])} == default_caps
+}
+
+paths_exact if {
+    {p | some p in object.get(linux, "MaskedPaths", [])} == masked_paths
+    {p | some p in object.get(linux, "ReadonlyPaths", [])} == readonly_paths
+}
+
+sysctl_exact(want) if { object.get(linux, "Sysctl", {}) == want }
+
+root_readonly(want) if {
+    object.get(object.get(input.OCI, "Root", {}), "Readonly", "unset") == want
+}
+
+# The mount type is accepted under either serialisation the runtime may use.
+mount_type(m) := t if { t := m.type_ } else := t if { t := m.type } else := ""
+
+mount_matches(m, w) if {
+    m.destination == w.destination
+    mount_type(m) == w.type
+    regex.match(w.source, m.source)
+    {o | some o in object.get(m, "options", [])} == w.options
+}
+
+mounts_exact(table) if {
+    mounts := object.get(input.OCI, "Mounts", [])
+    every m in mounts {
+        some w in table
+        mount_matches(m, w)
+    }
+    # Two mounts may not share a destination, so a permitted mount cannot be
+    # covered by a second one layered over it.
+    count({m.destination | some m in mounts}) == count(mounts)
+}
+
+under(path, prefix) if path == prefix
+under(path, prefix) if startswith(path, concat("", [prefix, "/"]))
+
+no_protected_mounts if {
+    every m in object.get(input.OCI, "Mounts", []) {
+        every p in protected_prefixes { not under(m.destination, p) }
+    }
+}
+
+rootfs_storages := [s |
+    some s in object.get(input, "storages", [])
+    object.get(s, "driver", "") == "image_guest_pull"
+]
+
+expected_rootfs := concat("", ["/run/kata-containers/",
+                               object.get(input, "container_id", "\u0000"),
+                               "/rootfs"])
+
+rootfs_bound if {
+    count(rootfs_storages) == 1
+    some s in rootfs_storages
+    object.get(s, "mount_point", "") == expected_rootfs
+    object.get(object.get(input.OCI, "Root", {}), "Path", "") == expected_rootfs
+}
+
+storage_shape_ok(s) if {
+    object.get(s, "fstype", "") == "overlay"
+    object.get(s, "shared", true) == false
+    object.get(s, "fs_group", "set") == null
+    count(object.get(s, "options", ["x"])) == 0
+}
+
+workload_rootfs_pinned if {
+    count(rootfs_storages) == 1
+    some s in rootfs_storages
+    some img in allowed_images
+    object.get(s, "source", "") == img
+    some opt in object.get(s, "driver_options", [])
+    contains(opt, concat("", [`"io.kubernetes.cri.image-name":"`, img, `"`]))
+    storage_shape_ok(s)
+}
+
+pause_rootfs_pinned if {
+    count(rootfs_storages) == 1
+    some s in rootfs_storages
+    object.get(s, "source", "") == "pause"
+    some opt in object.get(s, "driver_options", [])
+    contains(opt, concat("", [`"io.kubernetes.cri.podsandbox.image-name":"`, pause_image, `"`]))
+    storage_shape_ok(s)
+}
+
+allowed_storages := [
+    {"driver": "image_guest_pull", "mount_point": `^/run/kata-containers/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}/rootfs$`},
+    {"driver": "ephemeral",        "mount_point": `^/run/kata-containers/sandbox/(shm|ephemeral/.+)$`},
+    {"driver": "local",            "mount_point": `^/run/kata-containers/sandbox/local/.+$`},
+]
+
+storage_allowed(s) if {
+    some a in allowed_storages
+    object.get(s, "driver", "") == a.driver
+    regex.match(a.mount_point, object.get(s, "mount_point", ""))
+}
+
+storages_safe if {
+    every s in object.get(input, "storages", []) {
+        storage_allowed(s)
+        every p in protected_prefixes { not under(object.get(s, "mount_point", ""), p) }
+    }
+}
+
+default CreateSandboxRequest := false
+CreateSandboxRequest if {
+    object.get(input, "guest_hook_path", "unset") == ""
+    count(object.get(input, "kernel_modules", [])) == 0
+}
+
 default PullImageRequest := false
- 
 PullImageRequest if {
     some img in allowed_images
     input.image == img
 }
 
-# --- DENIED -----------------------------------------------------------------
-default WriteStreamRequest := false
-default ReseedRandomDevRequest := false
-default PauseContainerRequest := false
-default ResumeContainerRequest := false
-default AddSwapRequest := false
-default StartTracingRequest := false
-default StopTracingRequest := false
-default UpdateEphemeralMountsRequest := false
-default UpdateContainerRequest := false
+
+# Only the four files the orchestrator owns, at the per-sandbox paths the
+# runtime generates for them. Any other path, and any path containing a
+# parent-directory reference, is refused. Without this the host holds a general
+# channel for placing a file of its choosing inside the enclave, which is the
+# payload half of every library-preload attack.
+copy_allowed := [
+    `^/run/kata-containers/shared/containers(?:/passthrough)?/(watchable/)?[a-f0-9]{64}-[a-z0-9]{16}-(hosts|hostname|resolv\.conf|termination-log)$`,
+]
 
 default CopyFileRequest := false
 
 CopyFileRequest if {
-    not regex.match("(^|/)\\.\\.($|/)", input.path)
-    startswith(input.path, "/run/kata-containers/")
-    not startswith(input.symlink_target, "/")
-    not regex.match("(^|/)\\.\\.($|/)", input.symlink_target)
+    not contains(input.path, "..")
+    some p in copy_allowed
+    regex.match(p, input.path)
 }
 
-default CreateContainerRequest := false
-
-CreateContainerRequest if {
-    input.OCI.Process.Args == ["/opt/cvn/entrypoint.sh"]
-    input.OCI.Process.User.UID == 0
-}
-
-CreateContainerRequest if {
-    input.OCI.Process.Args == ["/pause"]
-    input.OCI.Process.User.UID == 65535
-}
-
-
-# --- ALLOWED: what a sandbox needs to live and die --------------------------
-default CreateSandboxRequest := true
-default DestroySandboxRequest := true
+# Container output remains readable by the operator, deliberately.
+# In this runtime the host draining the output stream is the only mechanism
+# that empties it; refusing the read fills the buffer and stalls every process
+# inside the enclave that writes to it. Closing this channel is therefore not a
+# workable way to protect user content - the workload hangs instead.
+#
+# Confidentiality is established by controlling what reaches the stream. The
+# exact-environment rule above makes debug and request logging unreachable,
+# because the variables that would enable them cannot be set at all.
+#
+# The claim this supports, which a reader can check directly against the
+# output: container logs carry operational metadata only, no prompts and no
+# completions. The workload image additionally refuses to start if such logging
+# is enabled, but that is a property of the image, not of this policy.
 default ReadStreamRequest := true
+
+
+# ---- refused -----------------------------------------------------------------
+default ExecProcessRequest := false            # no shell, no additional process
+default SetPolicyRequest := false              # these rules cannot be replaced after boot
+default WriteStreamRequest := false            # no input injected into the workload
+default ReseedRandomDevRequest := false        # the host cannot influence in-enclave key generation
+default PauseContainerRequest := false         # the workload cannot be halted at a chosen moment
+default ResumeContainerRequest := false
+default AddSwapRequest := false                # enclave memory is never paged to host storage
+default StartTracingRequest := false           # no tracing channel out of the enclave
+default StopTracingRequest := false
+default UpdateEphemeralMountsRequest := false  # the filesystem view cannot change after admission
+default UpdateContainerRequest := false        # the container specification cannot change after admission
+default SetGuestDateTimeRequest := false       # the host cannot move the clock, which would affect
+                                               # certificate validity and attestation freshness
+default GetDiagnosticDataRequest := false      # no diagnostic extraction from the enclave
+
+# What the runtime needs in order to start, observe and tear down the sandbox.
+# None carries user content, and none can alter a container once admitted.
+# Network configuration remains the host's in any case, since the host is the
+# hypervisor.
+default DestroySandboxRequest := true
 default StartContainerRequest := true
 default RemoveContainerRequest := true
 default GuestDetailsRequest := true
@@ -72,7 +392,6 @@ default TtyWinResizeRequest := true
 default OnlineCPUMemRequest := true
 default MemHotplugByProbeRequest := true
 default GetMetricsRequest := true
-default SetGuestDateTimeRequest := true
 default RemoveStaleVirtiofsShareMountsRequest := true
 default UpdateInterfaceRequest := true
 default UpdateRoutesRequest := true
