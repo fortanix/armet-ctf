@@ -8,22 +8,43 @@ import future.keywords.if
 import future.keywords.in
 import future.keywords.every
 
+
+# ========================= DEPLOYMENT VALUES =================================
+
+# The workload image, pinned by digest. A tag names a mutable pointer; a digest
+# names content, and the enclave verifies it while pulling.
 allowed_images := [
-    "docker.io/prabhanjang/cvn-vllm-glm53flash@sha256:9d0fda256d3bcfe8381f0fdc3fde5ef8e24a1cc12ded0ac20011d19a38916a09",
+    "docker.io/prabhanjang/cvn-snp-policy-test@sha256:32fd06be862c3ce01ff61679e2d4afd8f5f6f7fdf6e5d2cc037d13a7b2afe06a",
 ]
+
+# The orchestrator's infrastructure image, as this runtime names it.
+#
+# This is a TAG, not a digest: the runtime does not offer a digest for the
+# sandbox image, so its content is not bound by this policy. Pinning the full
+# reference below still prevents the sandbox container being created from an
+# arbitrary image, which is the attack that matters, because a container in the
+# pod shares the pod's network namespace and would reach the workload's
+# loopback interface.
+pause_image := "ops-console.paas.rafay.dev/pause:3.10.2"
 
 workload_argv := ["/opt/cvn/entrypoint.sh"]
 workload_uid := 0
 
-
+# The complete environment of the workload process. Every entry originates in
+# the measured image. Admission requires an exact match: a variable added,
+# altered or removed is refused.
 workload_env := {
     "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-    "CVN_WORKLOAD_NAME=cvn-vllm-glm53",
+    "CVN_WORKLOAD_NAME=snp-policy-test",
     "CVN_LOG_LEVEL=info",
     "CVN_LISTEN_PORT=8080",
 }
 
-
+# Values the orchestrator supplies and legitimately varies between clusters and
+# restarts. The key is fixed and the value constrained by shape, so these
+# cannot carry content into the environment. They are the reason the policy
+# does not claim that the host contributes nothing to the environment: it
+# contributes these, and only in these shapes.
 platform_env_patterns := [
     `^HOSTNAME=[a-zA-Z0-9][a-zA-Z0-9.-]{0,62}$`,
     `^KUBERNETES_SERVICE_HOST=[0-9.]+$`,
@@ -33,12 +54,17 @@ platform_env_patterns := [
     `^TERM=[a-z0-9-]+$`,
 ]
 
+# The capability set both containers receive. Ambient and inheritable must be
+# empty; the three effective sets must match exactly, so neither a capability
+# added nor one silently widened is admitted.
 default_caps := {
     "CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FSETID", "CAP_FOWNER", "CAP_MKNOD",
     "CAP_NET_RAW", "CAP_SETGID", "CAP_SETUID", "CAP_SETFCAP", "CAP_SETPCAP",
     "CAP_NET_BIND_SERVICE", "CAP_SYS_CHROOT", "CAP_KILL", "CAP_AUDIT_WRITE",
 }
 
+# Compared as sets: the runtime returns these in a different order for the two
+# containers, so a list comparison would refuse one of them.
 masked_paths := {
     "/proc/acpi", "/proc/asound", "/proc/interrupts", "/proc/kcore",
     "/proc/keys", "/proc/latency_stats", "/proc/timer_list",
@@ -50,6 +76,7 @@ readonly_paths := {
     "/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger",
 }
 
+# Kernel parameters. The workload receives none; the sandbox receives two.
 workload_sysctl := {}
 pause_sysctl := {
     "net.ipv4.ip_unprivileged_port_start": "0",
@@ -59,6 +86,13 @@ pause_sysctl := {
 # The complete mount table for the workload. Each row fixes the destination,
 # the filesystem type, the permitted source path and the exact option set. A
 # mount absent from the table, or differing in one option, is refused.
+#
+# Source paths are patterns because the runtime generates them per sandbox; the
+# pattern admits only the enclave's own shared directory, for that one file.
+#
+# The control-group mount appears four times because the host kernel may
+# present it with additional delegation options. Enumerating the permitted
+# combinations keeps every other row's option set exact.
 workload_mounts := [
     {"destination": "/proc",       "type": "proc",   "source": `^proc$`,   "options": {"nosuid", "noexec", "nodev"}},
     {"destination": "/dev",        "type": "tmpfs",  "source": `^tmpfs$`,  "options": {"nosuid", "strictatime", "mode=755", "size=65536k"}},
@@ -91,6 +125,10 @@ pause_mounts := [
     {"destination": "/etc/resolv.conf", "type": "bind", "source": `^/run/kata-containers/shared/containers(?:/passthrough)?/(watchable/)?[a-f0-9]{64}-[a-z0-9]{16}-resolv\.conf$`, "options": {"rbind", "ro", "nosuid", "nodev", "noexec"}},
 ]
 
+# No mount and no storage may be placed at or beneath these paths, whatever the
+# tables above say. This is the independent guard against the cheapest attack
+# on a confidential workload: substituting code while the image digest, the
+# command line and every hardware measurement stay identical.
 protected_prefixes := [
     "/opt/cvn", "/usr", "/lib", "/lib64", "/bin", "/sbin", "/root",
     "/etc/ld.so.preload", "/etc/ld.so.conf", "/etc/ld.so.conf.d",
@@ -112,6 +150,13 @@ forbidden_env_prefixes := [
     "JDK_JAVA_OPTIONS=", "CLASSPATH=", "GCONV_PATH=", "LOCPATH=", "NLSPATH=",
 ]
 
+# ======================= END DEPLOYMENT VALUES ===============================
+
+
+# ---- container identity ------------------------------------------------------
+# Each container is identified by its command line, its user AND the container
+# type the runtime reports. Without the type check, an additional container
+# presenting the sandbox's command line would be judged by the sandbox rule.
 is_workload if {
     input.OCI.Process.Args == workload_argv
     input.OCI.Process.User.UID == workload_uid
@@ -127,11 +172,21 @@ is_pause if {
 ctype := object.get(object.get(input.OCI, "Annotations", {}),
                     "io.kubernetes.cri.container-type", "")
 
+
+# ---- admission ---------------------------------------------------------------
+# Nothing is admitted by default. Every line below is a REQUIREMENT: all of
+# them must hold for a container to be created.
+#
+# To add a restriction, add a line inside one of these bodies. Do NOT write a
+# further `CreateContainerRequest if { ... }` rule: rules sharing a name are
+# combined with OR, so a new rule is a new way to be admitted rather than a new
+# restriction.
 default CreateContainerRequest := false
 
 CreateContainerRequest if {
     is_workload
     input.OCI.Process.Cwd == "/"
+    object.get(input, "sandbox_pidns", true) == false
     env_exact
     no_forbidden_env
     mounts_exact(workload_mounts)
@@ -147,6 +202,7 @@ CreateContainerRequest if {
 CreateContainerRequest if {
     is_pause
     input.OCI.Process.Cwd == "/"
+    object.get(input, "sandbox_pidns", true) == false
     pause_env_exact
     no_forbidden_env
     mounts_exact(pause_mounts)
@@ -159,6 +215,8 @@ CreateContainerRequest if {
     pause_rootfs_pinned
 }
 
+
+# ---- environment -------------------------------------------------------------
 env_platform(e) if {
     some p in platform_env_patterns
     regex.match(p, e)
@@ -176,6 +234,7 @@ env_exact if {
     count(keys) == count({k | some k in keys})          # one value per variable
 }
 
+# The sandbox container receives only a search path.
 pause_env_exact if {
     object.get(input.OCI.Process, "Env", []) ==
         ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"]
@@ -187,6 +246,11 @@ no_forbidden_env if {
     }
 }
 
+
+# ---- process: capabilities, hooks, devices, seccomp, privilege ---------------
+# Hooks execute arbitrary programs around the container's lifecycle, and a
+# device entry exposes host hardware. Both must be absent. Capabilities are
+# compared exactly rather than as a maximum.
 process_hardened if {
     caps_exact
     object.get(input.OCI, "Hooks", "set") == null
@@ -221,6 +285,8 @@ root_readonly(want) if {
     object.get(object.get(input.OCI, "Root", {}), "Readonly", "unset") == want
 }
 
+
+# ---- mounts ------------------------------------------------------------------
 # The mount type is accepted under either serialisation the runtime may use.
 mount_type(m) := t if { t := m.type_ } else := t if { t := m.type } else := ""
 
@@ -251,6 +317,22 @@ no_protected_mounts if {
     }
 }
 
+
+# ---- the root filesystem -----------------------------------------------------
+# Two separate requirements.
+#
+# First, the container must be ROOTED ON the filesystem that was pulled. The
+# request carries the container identifier, and the runtime derives both the
+# storage mount point and the root path from it, so both are bound to it here.
+# Pinning the pulled image without this would prove only that the right image
+# was fetched somewhere, not that the container uses it.
+#
+# Second, that filesystem must be the pinned image. The reference in `source`
+# is what the in-enclave image service resolves and whose manifest digest it
+# verifies while pulling, so a digest reference binds content. The same
+# reference also appears in the storage's driver options, under a different key
+# for each container type; both are checked, so the two cannot be made to
+# disagree.
 rootfs_storages := [s |
     some s in object.get(input, "storages", [])
     object.get(s, "driver", "") == "image_guest_pull"
@@ -267,6 +349,9 @@ rootfs_bound if {
     object.get(object.get(input.OCI, "Root", {}), "Path", "") == expected_rootfs
 }
 
+# Structural requirements on a filesystem produced by the in-enclave pull.
+# These deliberately fail closed if the runtime stops sending a field: a
+# refusal with a clear message is preferable to a check that silently passes.
 storage_shape_ok(s) if {
     object.get(s, "fstype", "") == "overlay"
     object.get(s, "shared", true) == false
@@ -293,16 +378,46 @@ pause_rootfs_pinned if {
     storage_shape_ok(s)
 }
 
+# Every storage the host offers must match a row here. Each row fixes the
+# driver, the filesystem type, the source and the mount point - not the mount
+# point alone, which leaves the filesystem and its source free for the host to
+# choose.
+#
+# Only the two storages this workload actually uses are listed. A wildcard tail
+# on a mount-point pattern is what lets a path climb out of the directory it
+# names, so there is none here, and `path_sane` refuses any parent-directory
+# segment regardless.
 allowed_storages := [
-    {"driver": "image_guest_pull", "mount_point": `^/run/kata-containers/[A-Za-z0-9][A-Za-z0-9_.-]{0,63}/rootfs$`},
-    {"driver": "ephemeral",        "mount_point": `^/run/kata-containers/sandbox/(shm|ephemeral/.+)$`},
-    {"driver": "local",            "mount_point": `^/run/kata-containers/sandbox/local/.+$`},
+    {"driver": "image_guest_pull",
+     "fstype": "overlay",
+     "mount_point": `^/run/kata-containers/[A-Za-z0-9][A-Za-z0-9_-]{0,63}/rootfs$`,
+     "source": `^[A-Za-z0-9][A-Za-z0-9@:/._-]{0,250}$`,
+     "options": set()},
+    {"driver": "ephemeral",
+     "fstype": "tmpfs",
+     "mount_point": `^/run/kata-containers/sandbox/shm$`,
+     "source": `^shm$`,
+     "options": {"noexec", "nosuid", "nodev", "mode=1777", "size=67108864"}},
 ]
+
+# A path the policy will reason about must be absolute, free of
+# parent-directory segments, and free of empty segments. A pattern alone is not
+# enough: a wildcard that looks bounded still matches `../../..`.
+path_sane(p) if {
+    startswith(p, "/")
+    not contains(p, "..")
+    not contains(p, "//")
+    not contains(p, `\`)
+}
 
 storage_allowed(s) if {
     some a in allowed_storages
     object.get(s, "driver", "") == a.driver
+    object.get(s, "fstype", "") == a.fstype
+    path_sane(object.get(s, "mount_point", ""))
     regex.match(a.mount_point, object.get(s, "mount_point", ""))
+    regex.match(a.source, object.get(s, "source", ""))
+    {o | some o in object.get(s, "options", [])} == a.options
 }
 
 storages_safe if {
@@ -312,19 +427,53 @@ storages_safe if {
     }
 }
 
+
+# ---- sandbox creation --------------------------------------------------------
+# This request can ask the agent to run hooks from a directory in the guest and
+# to load kernel modules. Both are code execution inside the enclave, so both
+# must be empty.
+#
+# The field names are the ones a live request carries, confirmed rather than
+# assumed - a name this policy got wrong would read as absent and the check
+# would then pass without doing anything.
+#
+# The shared PID namespace is pinned off. With it on, any container in the pod
+# can see the inference process through /proc - its command line, its memory
+# maps, and with the right capability its memory. That is a quiet way around
+# everything else established here.
 default CreateSandboxRequest := false
+
 CreateSandboxRequest if {
     object.get(input, "guest_hook_path", "unset") == ""
-    count(object.get(input, "kernel_modules", [])) == 0
+    count(object.get(input, "kernel_modules", ["x"])) == 0
+    object.get(input, "sandbox_pidns", true) == false
+    sandbox_storages_safe
 }
 
+# The sandbox request carries its own storage list. Left unchecked it is a
+# second, quieter way to place a filesystem of the host's choosing inside the
+# enclave, so it is held to the same table and the same path rules.
+sandbox_storages_safe if {
+    every s in object.get(input, "storages", []) {
+        storage_allowed(s)
+        every p in protected_prefixes { not under(object.get(s, "mount_point", ""), p) }
+    }
+}
+
+
+# ---- image pull --------------------------------------------------------------
+# Where the runtime issues an image-pull request, only a pinned digest may be
+# fetched. Not every runtime version consults this rule; the root-filesystem
+# binding above is the one that applies on every admission.
 default PullImageRequest := false
+
 PullImageRequest if {
     some img in allowed_images
     input.image == img
 }
 
 
+# ---- files the host may deliver into the enclave ------------------------------
 # Only the four files the orchestrator owns, at the per-sandbox paths the
 # runtime generates for them. Any other path, and any path containing a
 # parent-directory reference, is refused. Without this the host holds a general
@@ -337,12 +486,50 @@ copy_allowed := [
 default CopyFileRequest := false
 
 CopyFileRequest if {
-    not contains(input.path, "..")
+    path_sane(object.get(input, "path", ""))
     some p in copy_allowed
-    regex.match(p, input.path)
+    regex.match(p, object.get(input, "path", ""))
+    copy_mode_ok
+    not_a_symlink
+    # The request names the kind of file outright. A link, device node, socket
+    # or directory delivered under a permitted name is refused here.
+    object.get(input, "file_type", "") == "Regular"
 }
 
+# A permitted FILENAME is not a permitted FILE.
+#
+# Every regular-file mode that carries no execute, setuid, setgid or sticky
+# bit: 0o100000 combined with read/write permissions for owner, group and
+# other. Enumerated rather than computed, so the rule stays readable and does
+# not depend on bitwise builtins the guest's policy engine may not provide.
+#
+# The four orchestrator files do not all share one mode - the termination log
+# is commonly more permissive than the others - so pinning the single value
+# seen on one file refuses the rest.
+#
+# What cannot match: a symbolic link (0o120777 = 41471), a directory
+# (0o040755 = 16877), anything executable (0o100755 = 33261) and anything
+# setuid (0o104644 = 35300).
+allowed_copy_modes := [
+    32768, 32770, 32772, 32774, 32784, 32786, 32788, 32790,
+    32800, 32802, 32804, 32806, 32816, 32818, 32820, 32822,
+    32896, 32898, 32900, 32902, 32912, 32914, 32916, 32918,
+    32928, 32930, 32932, 32934, 32944, 32946, 32948, 32950,
+    33024, 33026, 33028, 33030, 33040, 33042, 33044, 33046,
+    33056, 33058, 33060, 33062, 33072, 33074, 33076, 33078,
+    33152, 33154, 33156, 33158, 33168, 33170, 33172, 33174,
+    33184, 33186, 33188, 33190, 33200, 33202, 33204, 33206,
+]
+
+copy_mode_ok if {
+    some m in allowed_copy_modes
+    object.get(input, "file_mode", -1) == m
+}
+
+
+# ---- container output --------------------------------------------------------
 # Container output remains readable by the operator, deliberately.
+#
 # In this runtime the host draining the output stream is the only mechanism
 # that empties it; refusing the read fills the buffer and stalls every process
 # inside the enclave that writes to it. Closing this channel is therefore not a
@@ -375,6 +562,8 @@ default SetGuestDateTimeRequest := false       # the host cannot move the clock,
                                                # certificate validity and attestation freshness
 default GetDiagnosticDataRequest := false      # no diagnostic extraction from the enclave
 
+
+# ---- permitted: sandbox lifecycle, network configuration and metrics --------
 # What the runtime needs in order to start, observe and tear down the sandbox.
 # None carries user content, and none can alter a container once admitted.
 # Network configuration remains the host's in any case, since the host is the
@@ -398,6 +587,7 @@ default UpdateRoutesRequest := true
 default ListInterfacesRequest := true
 default ListRoutesRequest := true
 default AddARPNeighborsRequest := true
+
 '''
 "aa.toml" = '''
 [token_configs.ccm_as]
@@ -408,5 +598,5 @@ ccm_domain_names = ["fortanix.com"]
 name = "ccm_kbc"
 url = "https://apps.amer.smartkey.io"
 [kbc_configs.ccm_kbc]
-dsm_app_id = "22b1bc64-a371-438d-af30-d714dfc212cb"
+dsm_app_id = "064bb562-ea87-4654-88d9-fb8647feebc4"
 '''
