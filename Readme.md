@@ -8,12 +8,12 @@
 ## What we are asking
 
 Reviewing the policy to check if this rule set meets security criteria. If it does, 
-we will regenerate the tables against the TDX production node and deploy once.
+we will regenerate the tables against the production node and deploy once.
 
 The file has two halves and they warrant different scrutiny:
 
 - **Rules** — the admission logic. These carry the security properties and
-  port to TDX unchanged. This is what we want reviewed.
+  port to production unchanged. This is what we want reviewed.
 - **Tables** — environment, mounts, capabilities, devices, storages, masked
   paths. Node-specific data, derived from live requests on the rehearsal node.
   Every one is regenerated from the production node's own requests, so

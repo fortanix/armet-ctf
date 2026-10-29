@@ -1,0 +1,352 @@
+[
+  {
+    "id": "N1-symlink-empty",
+    "rule": "not_a_symlink",
+    "expect": true,
+    "why": "an empty symlink_target means the file is not a link",
+    "input": {
+      "symlink_target": ""
+    }
+  },
+  {
+    "id": "N2-symlink-set",
+    "rule": "not_a_symlink",
+    "expect": false,
+    "why": "a populated symlink_target must be refused",
+    "input": {
+      "symlink_target": "/etc/passwd"
+    }
+  },
+  {
+    "id": "N3-symlink-null",
+    "rule": "not_a_symlink",
+    "expect": true,
+    "why": "the runtime sends null when the field is absent",
+    "input": {
+      "symlink_target": null
+    }
+  },
+  {
+    "id": "S1-sandbox-legitimate",
+    "rule": "sandbox_storages_safe",
+    "expect": true,
+    "why": "the infrastructure rootfs and the shared-memory mount are the only sandbox storages",
+    "input": {
+      "storages": [
+        {
+          "driver": "image_guest_pull",
+          "fstype": "overlay",
+          "source": "pause",
+          "mount_point": "/run/kata-containers/c0ffee01/rootfs",
+          "driver_options": [
+            "image_guest_pull={\"metadata\":{\"io.kubernetes.cri.podsandbox.image-name\":\"ops-console.paas.rafay.dev/pause:3.10.2\"}}"
+          ],
+          "shared": false,
+          "fs_group": null,
+          "options": []
+        },
+        {
+          "driver": "ephemeral",
+          "fstype": "tmpfs",
+          "source": "shm",
+          "mount_point": "/run/kata-containers/sandbox/shm",
+          "driver_options": [],
+          "shared": false,
+          "fs_group": null,
+          "options": [
+            "noexec",
+            "nosuid",
+            "nodev",
+            "mode=1777",
+            "size=67108864"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "S2-sandbox-unapproved-image",
+    "rule": "sandbox_storages_safe",
+    "expect": false,
+    "why": "REGRESSION: the shape pattern admitted any well-formed reference here",
+    "input": {
+      "storages": [
+        {
+          "driver": "image_guest_pull",
+          "fstype": "overlay",
+          "source": "docker.io/attacker/evil@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "mount_point": "/run/kata-containers/c0ffee01/rootfs",
+          "driver_options": [
+            "image_guest_pull={\"metadata\":{\"io.kubernetes.cri.image-name\":\"docker.io/attacker/evil@sha256:0000000000000000000000000000000000000000000000000000000000000000\"}}"
+          ],
+          "shared": false,
+          "fs_group": null,
+          "options": []
+        },
+        {
+          "driver": "ephemeral",
+          "fstype": "tmpfs",
+          "source": "shm",
+          "mount_point": "/run/kata-containers/sandbox/shm",
+          "driver_options": [],
+          "shared": false,
+          "fs_group": null,
+          "options": [
+            "noexec",
+            "nosuid",
+            "nodev",
+            "mode=1777",
+            "size=67108864"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "S3-sandbox-carries-workload-image",
+    "rule": "sandbox_storages_safe",
+    "expect": false,
+    "why": "the sandbox path must never carry the workload image",
+    "input": {
+      "storages": [
+        {
+          "driver": "image_guest_pull",
+          "fstype": "overlay",
+          "source": "docker.io/prabhanjang/cvn-snp-policy-test@sha256:32fd06be862c3ce01ff61679e2d4afd8f5f6f7fdf6e5d2cc037d13a7b2afe06a",
+          "mount_point": "/run/kata-containers/c0ffee01/rootfs",
+          "driver_options": [
+            "image_guest_pull={\"metadata\":{\"io.kubernetes.cri.image-name\":\"docker.io/prabhanjang/cvn-snp-policy-test@sha256:32fd06be862c3ce01ff61679e2d4afd8f5f6f7fdf6e5d2cc037d13a7b2afe06a\",\"io.kubernetes.cri.sandbox-id\":\"6f1a2b\"}}"
+          ],
+          "shared": false,
+          "fs_group": null,
+          "options": []
+        },
+        {
+          "driver": "ephemeral",
+          "fstype": "tmpfs",
+          "source": "shm",
+          "mount_point": "/run/kata-containers/sandbox/shm",
+          "driver_options": [],
+          "shared": false,
+          "fs_group": null,
+          "options": [
+            "noexec",
+            "nosuid",
+            "nodev",
+            "mode=1777",
+            "size=67108864"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "C1-container-legitimate",
+    "rule": "storages_safe",
+    "expect": true,
+    "why": "the workload rootfs and the shared-memory mount",
+    "input": {
+      "storages": [
+        {
+          "driver": "image_guest_pull",
+          "fstype": "overlay",
+          "source": "docker.io/prabhanjang/cvn-snp-policy-test@sha256:32fd06be862c3ce01ff61679e2d4afd8f5f6f7fdf6e5d2cc037d13a7b2afe06a",
+          "mount_point": "/run/kata-containers/c0ffee01/rootfs",
+          "driver_options": [
+            "image_guest_pull={\"metadata\":{\"io.kubernetes.cri.image-name\":\"docker.io/prabhanjang/cvn-snp-policy-test@sha256:32fd06be862c3ce01ff61679e2d4afd8f5f6f7fdf6e5d2cc037d13a7b2afe06a\",\"io.kubernetes.cri.sandbox-id\":\"6f1a2b\"}}"
+          ],
+          "shared": false,
+          "fs_group": null,
+          "options": []
+        },
+        {
+          "driver": "ephemeral",
+          "fstype": "tmpfs",
+          "source": "shm",
+          "mount_point": "/run/kata-containers/sandbox/shm",
+          "driver_options": [],
+          "shared": false,
+          "fs_group": null,
+          "options": [
+            "noexec",
+            "nosuid",
+            "nodev",
+            "mode=1777",
+            "size=67108864"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "C2-container-unapproved-image",
+    "rule": "storages_safe",
+    "expect": false,
+    "why": "an unapproved source is refused by the table, not only by the later pin",
+    "input": {
+      "storages": [
+        {
+          "driver": "image_guest_pull",
+          "fstype": "overlay",
+          "source": "docker.io/attacker/evil@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "mount_point": "/run/kata-containers/c0ffee01/rootfs",
+          "driver_options": [
+            "image_guest_pull={\"metadata\":{\"io.kubernetes.cri.image-name\":\"docker.io/attacker/evil@sha256:0000000000000000000000000000000000000000000000000000000000000000\"}}"
+          ],
+          "shared": false,
+          "fs_group": null,
+          "options": []
+        },
+        {
+          "driver": "ephemeral",
+          "fstype": "tmpfs",
+          "source": "shm",
+          "mount_point": "/run/kata-containers/sandbox/shm",
+          "driver_options": [],
+          "shared": false,
+          "fs_group": null,
+          "options": [
+            "noexec",
+            "nosuid",
+            "nodev",
+            "mode=1777",
+            "size=67108864"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "id": "W1-options-clean",
+    "rule": "workload_rootfs_pinned",
+    "expect": true,
+    "why": "one entry, one occurrence of the key, the approved reference",
+    "input": {
+      "storages": [
+        {
+          "driver": "image_guest_pull",
+          "fstype": "overlay",
+          "source": "docker.io/prabhanjang/cvn-snp-policy-test@sha256:32fd06be862c3ce01ff61679e2d4afd8f5f6f7fdf6e5d2cc037d13a7b2afe06a",
+          "mount_point": "/run/kata-containers/c0ffee01/rootfs",
+          "driver_options": [
+            "image_guest_pull={\"metadata\":{\"io.kubernetes.cri.image-name\":\"docker.io/prabhanjang/cvn-snp-policy-test@sha256:32fd06be862c3ce01ff61679e2d4afd8f5f6f7fdf6e5d2cc037d13a7b2afe06a\",\"io.kubernetes.cri.sandbox-id\":\"6f1a2b\"}}"
+          ],
+          "shared": false,
+          "fs_group": null,
+          "options": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "W2-options-duplicate-key",
+    "rule": "workload_rootfs_pinned",
+    "expect": false,
+    "why": "REGRESSION: a substring test passed this; the parser would take the other value",
+    "input": {
+      "storages": [
+        {
+          "driver": "image_guest_pull",
+          "fstype": "overlay",
+          "source": "docker.io/prabhanjang/cvn-snp-policy-test@sha256:32fd06be862c3ce01ff61679e2d4afd8f5f6f7fdf6e5d2cc037d13a7b2afe06a",
+          "mount_point": "/run/kata-containers/c0ffee01/rootfs",
+          "driver_options": [
+            "image_guest_pull={\"metadata\":{\"io.kubernetes.cri.image-name\":\"docker.io/attacker/evil@sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"io.kubernetes.cri.image-name\":\"docker.io/prabhanjang/cvn-snp-policy-test@sha256:32fd06be862c3ce01ff61679e2d4afd8f5f6f7fdf6e5d2cc037d13a7b2afe06a\"}}"
+          ],
+          "shared": false,
+          "fs_group": null,
+          "options": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "W3-options-second-entry",
+    "rule": "workload_rootfs_pinned",
+    "expect": false,
+    "why": "REGRESSION: a second entry of the list went unexamined",
+    "input": {
+      "storages": [
+        {
+          "driver": "image_guest_pull",
+          "fstype": "overlay",
+          "source": "docker.io/prabhanjang/cvn-snp-policy-test@sha256:32fd06be862c3ce01ff61679e2d4afd8f5f6f7fdf6e5d2cc037d13a7b2afe06a",
+          "mount_point": "/run/kata-containers/c0ffee01/rootfs",
+          "driver_options": [
+            "image_guest_pull={\"metadata\":{\"io.kubernetes.cri.image-name\":\"docker.io/prabhanjang/cvn-snp-policy-test@sha256:32fd06be862c3ce01ff61679e2d4afd8f5f6f7fdf6e5d2cc037d13a7b2afe06a\",\"io.kubernetes.cri.sandbox-id\":\"6f1a2b\"}}",
+            "nydus={\"x\":\"y\"}"
+          ],
+          "shared": false,
+          "fs_group": null,
+          "options": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "W4-options-other-image",
+    "rule": "workload_rootfs_pinned",
+    "expect": false,
+    "why": "the single entry must name the approved reference",
+    "input": {
+      "storages": [
+        {
+          "driver": "image_guest_pull",
+          "fstype": "overlay",
+          "source": "docker.io/prabhanjang/cvn-snp-policy-test@sha256:32fd06be862c3ce01ff61679e2d4afd8f5f6f7fdf6e5d2cc037d13a7b2afe06a",
+          "mount_point": "/run/kata-containers/c0ffee01/rootfs",
+          "driver_options": [
+            "image_guest_pull={\"metadata\":{\"io.kubernetes.cri.image-name\":\"docker.io/attacker/evil@sha256:0000000000000000000000000000000000000000000000000000000000000000\"}}"
+          ],
+          "shared": false,
+          "fs_group": null,
+          "options": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "P1-pause-clean",
+    "rule": "pause_rootfs_pinned",
+    "expect": true,
+    "why": "the infrastructure rootfs, pinned by name under its own key",
+    "input": {
+      "storages": [
+        {
+          "driver": "image_guest_pull",
+          "fstype": "overlay",
+          "source": "pause",
+          "mount_point": "/run/kata-containers/c0ffee01/rootfs",
+          "driver_options": [
+            "image_guest_pull={\"metadata\":{\"io.kubernetes.cri.podsandbox.image-name\":\"ops-console.paas.rafay.dev/pause:3.10.2\"}}"
+          ],
+          "shared": false,
+          "fs_group": null,
+          "options": []
+        }
+      ]
+    }
+  },
+  {
+    "id": "P2-pause-duplicate-key",
+    "rule": "pause_rootfs_pinned",
+    "expect": false,
+    "why": "the same contradictory-JSON case on the infrastructure container",
+    "input": {
+      "storages": [
+        {
+          "driver": "image_guest_pull",
+          "fstype": "overlay",
+          "source": "pause",
+          "mount_point": "/run/kata-containers/c0ffee01/rootfs",
+          "driver_options": [
+            "image_guest_pull={\"metadata\":{\"io.kubernetes.cri.podsandbox.image-name\":\"evil/pause:1\",\"io.kubernetes.cri.podsandbox.image-name\":\"ops-console.paas.rafay.dev/pause:3.10.2\"}}"
+          ],
+          "shared": false,
+          "fs_group": null,
+          "options": []
+        }
+      ]
+    }
+  }
+]

@@ -8,6 +8,64 @@ import future.keywords.if
 import future.keywords.in
 import future.keywords.every
 
+# =============================================================================
+# Container admission policy for the confidential inference node.
+#
+# This file is measured. Its digest is bound into the hardware attestation
+# report, so a remote party can establish that these rules, and no others,
+# govern the enclave. The agent that enforces them runs inside the encrypted
+# virtual machine; the host asks that agent to perform each operation and
+# cannot bypass it, because it cannot read or modify the agent's memory.
+#
+# WHAT THIS POLICY ENFORCES
+#
+#   * Both containers in the pod are admitted only on an exact match of their
+#     command line, user, working directory, environment, mounts, capabilities,
+#     devices, hooks, seccomp, sysctl and masked paths.
+#   * Each container's root filesystem must be the image reference pinned for
+#     it, and must be the filesystem the container is actually rooted on.
+#   * No shell and no additional process may be started in either container.
+#   * These rules cannot be replaced while the enclave runs.
+#
+# WHAT IT DOES NOT ENFORCE - stated so that no reader assumes otherwise
+#
+#   * Availability. The host can stop the pod at any time.
+#   * Network configuration. The host is the hypervisor and owns the network.
+#     Traffic is protected by terminating TLS inside the enclave with a key
+#     generated there and never exported, which is outside this policy.
+#   * The content of the model or data the workload loads at runtime. That is
+#     verified by the workload itself; this policy's contribution is to
+#     guarantee that the code doing the verifying is the attested code.
+#   * The number of containers in the pod. Each request is judged on its own,
+#     so the policy constrains what any container may be, not how many exist.
+#   * The infrastructure container's image is pinned by NAME, not by digest.
+#     This runtime references it by tag, so its content is not bound. See the
+#     note at the sandbox image below.
+#
+# All tables below were taken from live requests on the target runtime, not
+# from the workload specification, which differs from what the agent receives.
+# Regenerate them after any change to the image, the workload specification or
+# the guest components; each change produces a new attestation value, which is
+# the intended behaviour.
+# =============================================================================
+
+
+# REVISION 2 - changes made in response to external review
+#
+#   * The storage table matched `source` against a character-class pattern,
+#     which admitted any well-formed reference. It is now an exact set, and
+#     the sandbox and container paths carry separate tables. The sandbox path
+#     previously accepted an unapproved image source, because nothing
+#     re-pinned it after the table check the way the container path does.
+#   * The driver-options check used a substring test over the whole list. It
+#     now requires exactly one entry, exactly one occurrence of the key in
+#     that entry, and the approved reference at that occurrence.
+#   * `not_a_symlink` is defined here, at the end of the copy-file section. A
+#     previously published copy of this file was missing its two defining
+#     lines and therefore did not compile. That copy was never the file that
+#     booted; this one is.
+# =============================================================================
+
 
 # ========================= DEPLOYMENT VALUES =================================
 
@@ -359,13 +417,34 @@ storage_shape_ok(s) if {
     count(object.get(s, "options", ["x"])) == 0
 }
 
+# The in-enclave image service reads the image reference out of the storage's
+# driver options, so that list must name the approved image and must not also
+# name a different one. Three requirements, each closing a separate hole:
+#
+#   * exactly one entry, so no second entry of the list goes unexamined;
+#   * the key occurs exactly once in that entry, so a repeated key cannot make
+#     this policy and the JSON parser that consumes the entry disagree about
+#     which value wins;
+#   * that single occurrence is followed by the approved reference.
+#
+# A substring test alone satisfies none of the three: it accepts an entry that
+# carries an approved name beside an unapproved one, and says nothing about
+# the rest of the list.
+driver_options_pinned(s, key, img) if {
+    opts := object.get(s, "driver_options", [])
+    count(opts) == 1
+    some opt in opts
+    marker := concat("", [`"`, key, `":"`])
+    count(split(opt, marker)) == 2
+    contains(opt, concat("", [marker, img, `"`]))
+}
+
 workload_rootfs_pinned if {
     count(rootfs_storages) == 1
     some s in rootfs_storages
     some img in allowed_images
     object.get(s, "source", "") == img
-    some opt in object.get(s, "driver_options", [])
-    contains(opt, concat("", [`"io.kubernetes.cri.image-name":"`, img, `"`]))
+    driver_options_pinned(s, "io.kubernetes.cri.image-name", img)
     storage_shape_ok(s)
 }
 
@@ -373,31 +452,59 @@ pause_rootfs_pinned if {
     count(rootfs_storages) == 1
     some s in rootfs_storages
     object.get(s, "source", "") == "pause"
-    some opt in object.get(s, "driver_options", [])
-    contains(opt, concat("", [`"io.kubernetes.cri.podsandbox.image-name":"`, pause_image, `"`]))
+    driver_options_pinned(s, "io.kubernetes.cri.podsandbox.image-name", pause_image)
     storage_shape_ok(s)
 }
 
 # Every storage the host offers must match a row here. Each row fixes the
-# driver, the filesystem type, the source and the mount point - not the mount
-# point alone, which leaves the filesystem and its source free for the host to
-# choose.
+# driver, the filesystem type, the mount point and the SET OF PERMITTED
+# SOURCES - not the mount point alone, which would leave the filesystem and
+# its source free for the host to choose.
 #
-# Only the two storages this workload actually uses are listed. A wildcard tail
-# on a mount-point pattern is what lets a path climb out of the directory it
-# names, so there is none here, and `path_sane` refuses any parent-directory
-# segment regardless.
-allowed_storages := [
+# The source is an exact set rather than a shape pattern. A pattern admits any
+# string of the right shape, which is not a restriction on a field whose whole
+# purpose is to name one specific thing.
+#
+# The two request paths carry separate tables. The container path may carry
+# either container's root filesystem; the sandbox path must never carry the
+# workload image.
+#
+# A wildcard tail on a mount-point pattern is what lets a path climb out of the
+# directory it names, so there is none here, and `path_sane` refuses any
+# parent-directory segment regardless.
+rootfs_mount_point := `^/run/kata-containers/[A-Za-z0-9][A-Za-z0-9_-]{0,63}/rootfs$`
+
+shm_storage := {
+    "driver": "ephemeral",
+    "fstype": "tmpfs",
+    "mount_point": `^/run/kata-containers/sandbox/shm$`,
+    "sources": {"shm"},
+    "options": {"noexec", "nosuid", "nodev", "mode=1777", "size=67108864"},
+}
+
+# This runtime reports the infrastructure container's root filesystem with the
+# literal source "pause" rather than an image reference, so that string is a
+# permitted source on the container path. Which of the two sources is
+# admissible for a given request is then decided by `workload_rootfs_pinned`
+# or `pause_rootfs_pinned`; this table only bounds the set.
+container_image_sources := {s | some s in array.concat(allowed_images, ["pause"])}
+
+container_allowed_storages := [
     {"driver": "image_guest_pull",
      "fstype": "overlay",
-     "mount_point": `^/run/kata-containers/[A-Za-z0-9][A-Za-z0-9_-]{0,63}/rootfs$`,
-     "source": `^[A-Za-z0-9][A-Za-z0-9@:/._-]{0,250}$`,
+     "mount_point": rootfs_mount_point,
+     "sources": container_image_sources,
      "options": set()},
-    {"driver": "ephemeral",
-     "fstype": "tmpfs",
-     "mount_point": `^/run/kata-containers/sandbox/shm$`,
-     "source": `^shm$`,
-     "options": {"noexec", "nosuid", "nodev", "mode=1777", "size=67108864"}},
+    shm_storage,
+]
+
+sandbox_allowed_storages := [
+    {"driver": "image_guest_pull",
+     "fstype": "overlay",
+     "mount_point": rootfs_mount_point,
+     "sources": {"pause"},
+     "options": set()},
+    shm_storage,
 ]
 
 # A path the policy will reason about must be absolute, free of
@@ -410,19 +517,20 @@ path_sane(p) if {
     not contains(p, `\`)
 }
 
-storage_allowed(s) if {
-    some a in allowed_storages
+storage_allowed(s, table) if {
+    some a in table
     object.get(s, "driver", "") == a.driver
     object.get(s, "fstype", "") == a.fstype
     path_sane(object.get(s, "mount_point", ""))
     regex.match(a.mount_point, object.get(s, "mount_point", ""))
-    regex.match(a.source, object.get(s, "source", ""))
+    some src in a.sources
+    object.get(s, "source", "") == src
     {o | some o in object.get(s, "options", [])} == a.options
 }
 
 storages_safe if {
     every s in object.get(input, "storages", []) {
-        storage_allowed(s)
+        storage_allowed(s, container_allowed_storages)
         every p in protected_prefixes { not under(object.get(s, "mount_point", ""), p) }
     }
 }
@@ -455,7 +563,7 @@ CreateSandboxRequest if {
 # enclave, so it is held to the same table and the same path rules.
 sandbox_storages_safe if {
     every s in object.get(input, "storages", []) {
-        storage_allowed(s)
+        storage_allowed(s, sandbox_allowed_storages)
         every p in protected_prefixes { not under(object.get(s, "mount_point", ""), p) }
     }
 }
@@ -495,6 +603,16 @@ CopyFileRequest if {
     # or directory delivered under a permitted name is refused here.
     object.get(input, "file_type", "") == "Regular"
 }
+
+# The request carries the link target explicitly, so this is the direct answer
+# to "an allowed filename pointing outside the permitted directory": the NAME
+# passes and the FILE does not.
+#
+# "No link" is accepted in either encoding the runtime may use - an empty string
+# or a null. Neither weakens the check: a symbolic link always carries a
+# non-empty target, so anything that is actually a link is refused by both.
+not_a_symlink if { object.get(input, "symlink_target", "") == "" }
+not_a_symlink if { object.get(input, "symlink_target", "") == null }
 
 # A permitted FILENAME is not a permitted FILE.
 #
@@ -588,6 +706,28 @@ default ListInterfacesRequest := true
 default ListRoutesRequest := true
 default AddARPNeighborsRequest := true
 
+
+# =============================================================================
+# DIAGNOSTIC RECIPE
+#
+# Every table here was taken from a live request, because the agent receives
+# something different from what the workload specification describes. To read a
+# real request, add temporarily:
+#
+#     dbg if {
+#         print("DUMP =", input)
+#         false
+#     }
+#
+# and place `dbg` as the FIRST line of the rule body you are investigating.
+# Rule bodies short-circuit, so a dbg after a failing line never runs. Place it
+# in one branch at a time: in the sandbox branch it refuses the sandbox, and
+# the workload container is then never requested.
+#
+# Read the message from the API or the runtime log rather than from a describe
+# command, which truncates it. Remove dbg before publishing - it refuses every
+# container by design.
+# =============================================================================
 '''
 "aa.toml" = '''
 [token_configs.ccm_as]
