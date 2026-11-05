@@ -31,7 +31,7 @@ RTMR0       b5b6a4094ad7f0723d5227df263144bbd36c2c0859142621cdfce286c06496b8a615
 RTMR1       b767cba3ab019c2c8a9027f87bd81074dcad56e8332d3b5df71edc37fced2915574cf79389aa86922a6e41aa512d26e3
 RTMR2       fffc07f5a1762199c0b9c03822dce398ec5737452fdf079636fa7898829d9f9b09bf7666eddf4c73b04171b3dc199d8d
 RTMR3       000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-MRCONFIGID  b88b41c01dab357445b7a40777093154898b4d61868e9498766be2a60e6ab41f2acebf5508f08eeb1f8d892be636085c
+MRCONFIGID  0a51d2f25e55cbba6aedbeaf9aa6f2fad89c99ee16bf896bf37d46845d4ba4b570fe7e454e23e98635cfbf24117fd07b
 ```
  
 | register | meaning |
@@ -42,7 +42,20 @@ MRCONFIGID  b88b41c01dab357445b7a40777093154898b4d61868e9498766be2a60e6ab41f2ace
 | `RTMR2` | kernel command line and initrd. |
 | `RTMR3` | unused by design. |
 | `MRCONFIGID` | `SHA-384(initdata.toml)` — **this repository's claim.** |
- 
+
+
+```
+docker.io/prabhanjang/cvn-sglang-glm53flash-v523@sha256:d0cb3c45f49a70b31a68cde0bafc5e6a8309ea5d9f2946d4c36ce87fd247847b
+``` 
+
+Its digest is pinned by the policy's `allowed_images`, and the in-enclave image
+service verifies the manifest digest while pulling, so the running code is
+bound to that reference
+
+Model weights are checked separately. The entrypoint hashes `/weights` and
+compares against `MODEL_WEIGHTS_SHA384`, baked into the measured image, before
+the engine starts.
+
 ---
 
 ## Verifying a live node

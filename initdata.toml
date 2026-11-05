@@ -40,7 +40,7 @@ import future.keywords.every
 # The workload image, pinned by digest. A tag names a mutable pointer; a digest
 # names content, and the enclave verifies it while pulling.
 allowed_images := [
-    "docker.io/prabhanjang/cvn-sglang-glm53flash-v523@sha256:31e4647c04b2b5189943b72e4b59936248c1b732b6f0cec31efbf1d2afb7cd68",
+    "docker.io/prabhanjang/cvn-sglang-glm53flash-v523@sha256:d0cb3c45f49a70b31a68cde0bafc5e6a8309ea5d9f2946d4c36ce87fd247847b",
 ]
 
 # The orchestrator's infrastructure image, as this runtime names it.
@@ -87,7 +87,7 @@ workload_env := {
     "CVN_GW_REPORT_DATA_ENCODING=hex",
     "CVN_HAPROXY_CFG=/etc/haproxy/haproxy.cfg",
     "CVN_HASH_JOBS=4",
-    "CVN_IMAGE_DIGEST=sha256:31e4647c04b2b5189943b72e4b59936248c1b732b6f0cec31efbf1d2afb7cd68",
+    "CVN_IMAGE_DIGEST=sha256:d0cb3c45f49a70b31a68cde0bafc5e6a8309ea5d9f2946d4c36ce87fd247847b",
     "CVN_KV_CACHE_DTYPE=auto",
     "CVN_MEM_FRACTION=0.75",
     "CVN_MODEL_ID=GLM-5.3-Flash",
@@ -305,6 +305,9 @@ protected_prefixes := [
 # error in that set. Each entry is a documented way to execute different code,
 # or to redirect what the attested code does, without altering the image.
 forbidden_env_prefixes := [
+    # Selects the file that computes the weights digest. The test harness sets
+    # it deliberately; a pod never may.
+    "CVN_DIGEST_LIB=",
     "LD_PRELOAD=", "LD_LIBRARY_PATH=", "LD_AUDIT=", "LD_PROFILE=",
     "LD_DEBUG=", "LD_DEBUG_OUTPUT=", "LD_ORIGIN_PATH=", "GLIBC_TUNABLES=",
     "PYTHONPATH=", "PYTHONSTARTUP=", "PYTHONHOME=", "PYTHONINSPECT=",
