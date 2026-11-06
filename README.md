@@ -20,9 +20,12 @@ Fetch the quote and read the registers out of it. Do not take these from a
 README — including this one:
  
 ```bash
+B=https://ctf.armet.ai
 NONCE=$(openssl rand -hex 16)
-curl -s "https://ctf.armet.ai/evidence/cpu?nonce=$NONCE" \
-  | jq -r '.measurements | to_entries[] | "\(.key)\t\(.value)"'
+ 
+curl -s -H "Authorization: Bearer $KEY" \
+  "$B/v1/attestation/report?nonce=$NONCE&model=GLM-5.3-Flash&version=2" \
+  > report.json
 ```
  
 ```
@@ -60,19 +63,11 @@ the engine starts.
 
 ## Verifying a live node
 
-```bash
-B=https://ctf.armet.ai
-NONCE=$(openssl rand -hex 16)
+| Endpoint | Returns | Auth |
+|---|---|---|
+| `GET /v1/attestation/report?nonce=<32-64 hex>&model=<name>&version=2` | the full binding document: TDX quote, PPCIe group evidence, TLS key binding | API key |
+| `GET /healthz` | liveness | open |
 
-curl -s "$B/evidence?nonce=$NONCE" | jq '{binding, measurements, stages}'
-```
-
-| Endpoint | Returns |
-|---|---|
-| `GET /evidence/cpu?nonce=<32-64 hex>` | Intel TDX quote |
-| `GET /evidence/gpu?nonce=<32-64 hex>` | NVIDIA PPCIe group evidence (8 GPU + 4 switch) |
-| `GET /evidence?nonce=<32-64 hex>` | both, as one binding document |
-| `GET /healthz` | liveness |
 
 Everything else returns 404. The guest agent's own `/cdh/resource/...`
 endpoints are never forwarded.
@@ -84,8 +79,9 @@ public key, so compare it against what your client actually negotiated:
 echo | openssl s_client -connect ctf.armet.ai:443 2>/dev/null \
   | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der \
   | openssl dgst -sha256 -binary | base64
-
-curl -s "$B/evidence/cpu?nonce=$NONCE" | jq -r '.binding.spki_sha256'
+ 
+jq -r 'paths(scalars) as $p | select($p[-1]|tostring|test("spki";"i"))
+       | "\($p|join("."))\t\(getpath($p))"' report.json
 ```
 
 If those differ, something is terminating TLS that the quote does not cover.
