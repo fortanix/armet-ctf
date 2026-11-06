@@ -1,53 +1,39 @@
-# Confidential AI node — attestation reference
+# Confidential inference node — GLM-5.3-Flash on Intel TDX + NVIDIA PPCIe
 
-GLM-5.3-Flash served from inside an **Intel TDX** confidential VM on 8x NVIDIA
-H200 SXM with 4x NVSwitch in **PPCIe** (Protected PCIe) mode.
+A single-tenant inference node serving GLM-5.3-Flash FP8 from inside an Intel
+TDX confidential VM, with 8× H200 SXM and 4× NVSwitch in one NVIDIA Protected
+PCIe group. Prompts and completions are never readable by the host, the
+operator, or anyone with physical access to the machine.
 
-This repository publishes the one input a third party cannot otherwise obtain:
-`initdata.toml`, the byte-exact preimage of the TD's `MRCONFIGID`. Everything
-else here can be derived from it or read out of a quote you fetch yourself.
+This repository holds everything needed to verify that claim independently: the
+guest agent policy that constrains the workload, the `initdata` whose hash is
+measured into the attestation report, and the tooling to reproduce and test
+both.
 
-## Verify it yourself
+Endpoint: `ctf.armet.ai` · TLS terminates **inside** the TD.
 
-```
-git clone https://github.com/fortanix/armet-ctf && cd armet-ctf
-ENDPOINT=the-node-hostname          # e.g. node.example.ai
-HOST="$ENDPOINT" bash verify.sh
-```
-
-`verify.sh` generates its own nonce, fetches a fresh TDX quote from the node,
-parses the measurements out of the quote's bytes, and checks that
-
-```
-MRCONFIGID == SHA-384(initdata.toml)
-```
-
-## Deriving MRCONFIGID
-
-```
-$ sha384sum initdata.toml
-6f5e1772e33b2226886d34cca4177fde87f491da4d433de72970aded14beb250d65270251b446c90560855b7f979dc5d  initdata.toml
-```
-
-This works because the host passes `initdata.toml` to the guest and the TD
-measures **SHA-384 over those exact bytes** into `MRCONFIGID`. 
-
-- **The policy is inside the measurement.** `initdata.toml` embeds
-  `policy.rego`, so the TD's `MRCONFIGID` commits to the Kata agent policy —
-  including `ExecProcessRequest: false` and the image allow-list. That is what
-  makes the next section meaningful.
+---
 
 ## Evidence
-
+ 
+Fetch the quote and read the registers out of it. Do not take these from a
+README — including this one:
+ 
+```bash
+NONCE=$(openssl rand -hex 16)
+curl -s "https://ctf.armet.ai/evidence/cpu?nonce=$NONCE" \
+  | jq -r '.measurements | to_entries[] | "\(.key)\t\(.value)"'
 ```
-MRTD         c78e2b8b2f66207f3807d8d999f51e04f5eab8f7aa02614a86ddd81b61f4e79c5d7616664fcb190b8eaae2e26d60b12a
-RTMR0        cfdae1db22a9f72f220b732a7de45bd5295a568451ee5309906c248dd70cde858adbd7693542bfd5edf3e0eed56a88b7
-RTMR1        b767cba3ab019c2c8a9027f87bd81074dcad56e8332d3b5df71edc37fced2915574cf79389aa86922a6e41aa512d26e3
-RTMR2        fffc07f5a1762199c0b9c03822dce398ec5737452fdf079636fa7898829d9f9b09bf7666eddf4c73b04171b3dc199d8d
-RTMR3        000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-MRCONFIGID   6f5e1772e33b2226886d34cca4177fde87f491da4d433de72970aded14beb250d65270251b446c90560855b7f979dc5d
+ 
 ```
-
+MRTD        c78e2b8b2f66207f3807d8d999f51e04f5eab8f7aa02614a86ddd81b61f4e79c5d7616664fcb190b8eaae2e26d60b12a
+RTMR0       b5b6a4094ad7f0723d5227df263144bbd36c2c0859142621cdfce286c06496b8a615aa513ece512bfeb8dd0ac7125419
+RTMR1       b767cba3ab019c2c8a9027f87bd81074dcad56e8332d3b5df71edc37fced2915574cf79389aa86922a6e41aa512d26e3
+RTMR2       fffc07f5a1762199c0b9c03822dce398ec5737452fdf079636fa7898829d9f9b09bf7666eddf4c73b04171b3dc199d8d
+RTMR3       000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+MRCONFIGID  0a51d2f25e55cbba6aedbeaf9aa6f2fad89c99ee16bf896bf37d46845d4ba4b570fe7e454e23e98635cfbf24117fd07b
+```
+ 
 | register | meaning |
 |---|---|
 | `MRTD` | the initial TD measurement — firmware and the TD's initial memory image. Reproducible across hosts for a given stack. |
@@ -55,8 +41,57 @@ MRCONFIGID   6f5e1772e33b2226886d34cca4177fde87f491da4d433de72970aded14beb250d65
 | `RTMR1` | guest kernel. |
 | `RTMR2` | kernel command line and initrd. |
 | `RTMR3` | unused by design. |
-| `MRCONFIGID` | `SHA-384(initdata.toml)` — this repository's claim. |
+| `MRCONFIGID` | `SHA-384(initdata.toml)` — **this repository's claim.** |
 
+
+```
+docker.io/prabhanjang/cvn-sglang-glm53flash-v523@sha256:d0cb3c45f49a70b31a68cde0bafc5e6a8309ea5d9f2946d4c36ce87fd247847b
+``` 
+
+Its digest is pinned by the policy's `allowed_images`, and the in-enclave image
+service verifies the manifest digest while pulling, so the running code is
+bound to that reference
+
+Model weights are checked separately. The entrypoint hashes `/weights` and
+compares against `MODEL_WEIGHTS_SHA384`, baked into the measured image, before
+the engine starts.
+
+---
+
+## Verifying a live node
+
+```bash
+B=https://ctf.armet.ai
+NONCE=$(openssl rand -hex 16)
+
+curl -s "$B/evidence?nonce=$NONCE" | jq '{binding, measurements, stages}'
+```
+
+| Endpoint | Returns |
+|---|---|
+| `GET /evidence/cpu?nonce=<32-64 hex>` | Intel TDX quote |
+| `GET /evidence/gpu?nonce=<32-64 hex>` | NVIDIA PPCIe group evidence (8 GPU + 4 switch) |
+| `GET /evidence?nonce=<32-64 hex>` | both, as one binding document |
+| `GET /healthz` | liveness |
+
+Everything else returns 404. The guest agent's own `/cdh/resource/...`
+endpoints are never forwarded.
+
+**Check the channel is the one that was attested.** The quote binds the TLS
+public key, so compare it against what your client actually negotiated:
+
+```bash
+echo | openssl s_client -connect ctf.armet.ai:443 2>/dev/null \
+  | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der \
+  | openssl dgst -sha256 -binary | base64
+
+curl -s "$B/evidence/cpu?nonce=$NONCE" | jq -r '.binding.spki_sha256'
+```
+
+If those differ, something is terminating TLS that the quote does not cover.
+`report_data` is the literal ASCII of the string you sent, 64 characters max.
+
+---
 
 ## Guest stack
 
@@ -73,28 +108,42 @@ guest image, not of `MRCONFIGID`**: they land in `RTMR1`/`RTMR2` along with the
 kernel, command line and initrd. So `initdata.toml` fixes how they are
 configured, and `RTMR1`/`RTMR2` fix what they are.
 
-## Image
 
-```
-docker.io/prabhanjang/cvn-vllm-glm53flash@sha256:9d0fda256d3bcfe8381f0fdc3fde5ef8e24a1cc12ded0ac20011d19a38916a09
-```
+## Reproducing and testing the policy
 
-Two of the image's layers are **encrypted**, and that is checkable by anyone
-without credentials to this node:
-
-```
-TOKEN=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:prabhanjang/cvn-vllm-glm53flash:pull" | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
-curl -s -H "Authorization: Bearer $TOKEN"   -H 'Accept: application/vnd.oci.image.manifest.v1+json'   "https://registry-1.docker.io/v2/prabhanjang/cvn-vllm-glm53flash/manifests/sha256:9d0fda256d3bcfe8381f0fdc3fde5ef8e24a1cc12ded0ac20011d19a38916a09"   | python3 -c 'import sys,json; m=json.load(sys.stdin); print("layers", len(m["layers"]), "encrypted at", [i for i,l in enumerate(m["layers"]) if "enc" in l["mediaType"]])'
+```bash
+./validate.sh initdata.toml <MRCONFIGID-from-the-quote>
 ```
 
-The decryption key lives in a Fortanix DSM security object and is released
-through the Confidential Data Hub only after CCM has verified this TD's
-measurements against the registered build. A substituted image does not obtain
-that key and cannot be unpacked.
+Six steps:
 
-Proves: a genuine TDX quote, bound to your nonce, reports an `MRCONFIGID` equal
-to the SHA-384 of the `initdata.toml` published here. The guest is therefore
-running this agent policy, with exec denied and image pulls restricted to the
-pinned digest.
+1. hashes `initdata.toml` and compares it to the `MRCONFIGID` you pass — take
+   that from the TDX quote, not from this README
+2. extracts the embedded policy to `measured-policy.rego`, left behind for you
+   to read
+3. rebuilds `initdata.toml` from the extracted policy and requires the same
+   hash back. This proves the extraction lost nothing, **and** that the
+   measured bytes contain only that policy plus the two config blocks the
+   script declares inline — nothing else is inside the measurement
+4. `opa check --strict`
+5. runs `policy-tests.py`: three request fixtures built from values measured on
+   a live node, which must be **admitted**, then 70 single-mutation cases which
+   must each be **refused**
+6. prints the forbidden-environment exceptions actually in force
 
+---
 
+## Contents
+
+| File | Purpose |
+|---|---|
+| `initdata.toml` | its SHA-384 is `MRCONFIGID`, and the policy is embedded in it |
+| `validate.sh` | start here: checks the measurement, extracts the policy, proves the extraction exact, tests it |
+| `policy-tests.py` | the fixtures and the 70 cases, invoked by step 5 |
+
+Requires `opa` and `python3`.
+
+The pod spec's `env` block is a measured interface, not a set of tuning knobs.
+Every value in it is pinned, so changing one changes the policy, which changes
+`MRCONFIGID` and requires re-registering the measurement. The same is true of
+editing a comment in the policy.
