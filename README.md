@@ -21,7 +21,7 @@ README — including this one:
  
 ```bash
 B=https://ctf.armet.ai
-NONCE=$(openssl rand -hex 16)
+NONCE=$(openssl rand -hex 32)
  
 curl -s -H "Authorization: Bearer $KEY" \
   "$B/v1/attestation/report?nonce=$NONCE&model=GLM-5.3-Flash&version=2" \
