@@ -57,7 +57,26 @@ bound to that reference
 
 Model weights are checked separately. The entrypoint hashes `/weights` and
 compares against `MODEL_WEIGHTS_SHA384`, baked into the measured image, before
-the engine starts.
+the engine starts. That value is pinned in the policy environment inside
+`initdata.toml`, so it is covered by `MRCONFIGID` — the same measurement that
+commits the node to this policy also commits it to this set of weights.
+
+```
+zai-org/GLM-5.3-Flash   b52f7ca1fbb5a117e621e919b7cc21aefed0dac37fe130ed7286d23c292fd24276400f2f0836aa8767a69ebf927c35a5
+```
+
+`weights-manifest.txt` and `weights_digest.sh` make that reproducible from a
+public download rather than taken on trust:
+ 
+```bash
+# 1. the manifest hashes to the digest pinned in initdata.toml
+sha384sum < weights-manifest.txt | awk '{print $1}'
+ 
+# 2. your own download matches the manifest, file by file
+cd <your copy of huggingface.co/zai-org/GLM-5.3-Flash>
+find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha384sum \
+  | diff - weights-manifest.txt && echo IDENTICAL
+```
 
 ---
 
@@ -78,14 +97,19 @@ public key, so compare it against what your client actually negotiated:
 ```bash
 echo | openssl s_client -connect ctf.armet.ai:443 2>/dev/null \
   | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der \
-  | openssl dgst -sha256 -binary | base64
+  | openssl dgst -sha256 -hex | awk '{print $NF}'
  
-jq -r 'paths(scalars) as $p | select($p[-1]|tostring|test("spki";"i"))
-       | "\($p|join("."))\t\(getpath($p))"' report.json
+jq -r '.tls_spki_sha256' report.json
 ```
 
 If those differ, something is terminating TLS that the quote does not cover.
-`report_data` is the literal ASCII of the string you sent, 64 characters max.
+
+**`REPORTDATA` does not carry your nonce.** It carries the full v2 digest as 64
+ASCII hex characters — a hash binding the nonce, the model id, the TLS SPKI
+hash and the NVIDIA evidence payload together. Looking for your nonce inside
+`REPORTDATA` will always fail; check the binding instead, by confirming the
+digest commits to the nonce you sent and to the SPKI of the connection you are
+on. The extraction above decodes it for you.
 
 ---
 
@@ -136,6 +160,8 @@ Six steps:
 | `initdata.toml` | its SHA-384 is `MRCONFIGID`, and the policy is embedded in it |
 | `validate.sh` | start here: checks the measurement, extracts the policy, proves the extraction exact, tests it |
 | `policy-tests.py` | the fixtures and the 70 cases, invoked by step 5 |
+| `weights_digest.sh` | the canonical weights-measurement algorithm, as the node runs it |
+| `weights-manifest.txt` | per-file SHA-384 of the measured weights; hashes to `MODEL_WEIGHTS_SHA384` |
 
 Requires `opa` and `python3`.
 
