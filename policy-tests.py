@@ -156,9 +156,43 @@ def build_fixtures(pol_path, outdir):
             "mount_point": "/run/kata-containers/%s/rootfs" % cid,
             "source": src, "options": [], "shared": False, "fs_group": None,
             "driver_options": ["image_guest_pull=" + json.dumps(
-                {img_key: img_val, "io.kubernetes.cri.container-type": "x"},
+                {"metadata": {img_key: img_val,
+                              "io.kubernetes.cri.container-type": "x"}},
                 separators=(",", ":"))],
         }
+
+    PAUSE_3102_REF = ("registry.k8s.io/pause@sha256:"
+                  "f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4")
+    EVIL_IMG = "docker.io/attacker/evil@sha256:" + "a" * 64
+
+    def _meta(f):
+        st = rootfs_storage(f)
+        opts = st['driver_options']
+        assert opts, 'fixture has no driver_options'
+        prefix, sep, body = opts[0].partition('=')
+        assert sep, f'driver_options[0] has no "=": {opts[0][:60]!r}'
+        b = json.loads(body)
+        md = b['metadata'] if isinstance(b.get('metadata'), dict) else b
+        return st, prefix, sep, b, md
+
+    def _reseal(st, prefix, sep, b):
+        st['driver_options'] = [prefix + sep + json.dumps(b, separators=(',', ':'))]
+
+    def swap_pause_image(f, new):
+        st, prefix, sep, b, md = _meta(f)
+        key = 'io.kubernetes.cri.podsandbox.image-name'
+        assert key in md, f'{key} absent from driver_options metadata'
+        assert md[key] != new, 'no-op: new value equals the old one'
+        md[key] = new
+        _reseal(st, prefix, sep, b)
+
+    def set_meta(f, updates):
+        st, prefix, sep, b, md = _meta(f)
+        before = dict(md)
+        md.update(updates)
+        assert md != before, 'no-op: updates changed nothing'
+        _reseal(st, prefix, sep, b)
+
 
     workload = {
         "container_id": WCID,
@@ -293,6 +327,47 @@ def rootfs_storage(f):
             return s
     raise AssertionError('fixture has no image_guest_pull storage')
 
+PAUSE_3102_REF = ("registry.k8s.io/pause@sha256:"
+                  "f548e0e8e3dc1896ca956272154dde3314e8cc4fde0a57577ee9fa1c63f5baf4")
+EVIL_IMG = "docker.io/attacker/evil@sha256:" + "a" * 64
+
+def _meta(f):
+    """Return the image_guest_pull driver_options and its metadata object.
+
+    Structural rather than str.replace(): a replace() whose target no longer
+    exists mutates nothing, which this suite has now hit three times (5 Nov
+    twice on shared paths, 19 Nov on the pause tag after it was pinned by
+    digest). These assert instead, so a stale target is a loud ERROR with a
+    reason rather than a silent NO-OP.
+    """
+    st = rootfs_storage(f)
+    opts = st['driver_options']
+    assert opts, 'fixture has no driver_options'
+    prefix, sep, body = opts[0].partition('=')
+    assert sep, f'driver_options[0] has no "=": {opts[0][:60]!r}'
+    b = json.loads(body)
+    md = b['metadata'] if isinstance(b.get('metadata'), dict) else b
+    return st, prefix, sep, b, md
+
+def _reseal(st, prefix, sep, b):
+    st['driver_options'] = [prefix + sep + json.dumps(b, separators=(',', ':'))]
+
+def swap_pause_image(f, new):
+    st, prefix, sep, b, md = _meta(f)
+    key = 'io.kubernetes.cri.podsandbox.image-name'
+    assert key in md, f'{key} absent from driver_options metadata'
+    assert md[key] != new, 'no-op: new value equals the old one'
+    md[key] = new
+    _reseal(st, prefix, sep, b)
+
+def set_meta(f, updates):
+    st, prefix, sep, b, md = _meta(f)
+    before = dict(md)
+    md.update(updates)
+    assert md != before, 'no-op: updates changed nothing'
+    _reseal(st, prefix, sep, b)
+
+
 def scsi_storage(f):
     for s in f['storages']:
         if s['driver'] == 'scsi':
@@ -399,8 +474,7 @@ CASES = [
  ('pause rootfs writable', 'pause',
   lambda f: f['OCI']['Root'].__setitem__('Readonly', False)),
  ('pause image changed in driver_options', 'pause',
-  lambda f: rootfs_storage(f).__setitem__('driver_options',
-      [rootfs_storage(f)['driver_options'][0].replace('pause:3.10.1', 'pause:3.9')])),
+  lambda f: swap_pause_image(f, PAUSE_3102_REF)),
  ('pause storage source changed', 'pause',
   lambda f: rootfs_storage(f).__setitem__('source', 'notpause')),
 
@@ -483,6 +557,19 @@ CASES = [
       'driver_options': []})),
  ('sandbox_pidns enabled', 'workload',
   lambda f: f.__setitem__('sandbox_pidns', True)),
+
+ ('FINDING: image_guest_pull source well-shaped but unpinned', 'workload',
+  lambda f: rootfs_storage(f).__setitem__('source', EVIL_IMG)),
+ ('FINDING: pinned pair present only in a nested object', 'workload',
+  lambda f: set_meta(f, {'io.kubernetes.cri.image-name': EVIL_IMG,
+                         'nested': {'io.kubernetes.cri.image-name': EVIL_IMG}})),
+ ('FINDING: two image-name keys disagree', 'workload',
+  lambda f: set_meta(f, {'io.kubernetes.cri.podsandbox.image-name': EVIL_IMG})),
+ ('FINDING: two image_guest_pull options, one unpinned', 'workload',
+  lambda f: rootfs_storage(f).__setitem__('driver_options',
+      rootfs_storage(f)['driver_options'] + ['image_guest_pull=' + json.dumps(
+          {"metadata": {"io.kubernetes.cri.image-name": EVIL_IMG}},
+          separators=(',', ':'))])), 
 
  # --- sandbox request -----------------------------------------------------
  ('guest hook path set', 'sandbox',
