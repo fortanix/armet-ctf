@@ -40,18 +40,11 @@ import future.keywords.every
 # The workload image, pinned by digest. A tag names a mutable pointer; a digest
 # names content, and the enclave verifies it while pulling.
 allowed_images := [
-    "docker.io/prabhanjang/cvn-sglang-glm53flash-v523@sha256:d0cb3c45f49a70b31a68cde0bafc5e6a8309ea5d9f2946d4c36ce87fd247847b",
+    "docker.io/prabhanjang/cvn-sglang-glm53flash-v523@sha256:b5269d74e1506add71a61566ad9a94f8e1b41fa7ef4170ba3f2cde176dd0b1c4",
 ]
 
-# The orchestrator's infrastructure image, as this runtime names it.
-#
-# This is a TAG, not a digest: the runtime does not offer a digest for the
-# sandbox image, so its content is not bound by this policy. Pinning the full
-# reference below still prevents the sandbox container being created from an
-# arbitrary image, which is the attack that matters, because a container in the
-# pod shares the pod's network namespace and would reach the workload's
-# loopback interface.
-pause_image := "registry.k8s.io/pause:3.10.1"
+# The orchestrator's infrastructure image, pinned BY DIGEST
+pause_image := "registry.k8s.io/pause@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c"
 
 workload_argv := ["/opt/cvn/entrypoint.sh"]
 workload_uid := 0
@@ -83,13 +76,11 @@ workload_env := {
     "CVN_GPU_ARCH=HOPPER",
     "CVN_GPU_COLLECT_CMD=nvattest collect-evidence --device gpu --format json --nonce {nonce}",
     "CVN_GPU_COLLECT_TIMEOUT=180",
-    "CVN_GPU_VERIFIER_CMD=python3 -m ppcie.verifier.verification --nonce {nonce} --verifier remote --log-level info",
     "CVN_GW_REPORT_DATA_ENCODING=hex",
     "CVN_HAPROXY_CFG=/etc/haproxy/haproxy.cfg",
     "CVN_HASH_JOBS=4",
-    "CVN_IMAGE_DIGEST=sha256:d0cb3c45f49a70b31a68cde0bafc5e6a8309ea5d9f2946d4c36ce87fd247847b",
-    "CVN_KV_CACHE_DTYPE=auto",
-    "CVN_MEM_FRACTION=0.75",
+    "CVN_IMAGE_DIGEST=sha256:b5269d74e1506add71a61566ad9a94f8e1b41fa7ef4170ba3f2cde176dd0b1c4",
+    "CVN_MEM_FRACTION=0.88",
     "CVN_MODEL_ID=GLM-5.3-Flash",
     "CVN_REQUIRE_SWITCH_EVIDENCE=1",
     "CVN_SERVE_HOST=127.0.0.1",
@@ -98,7 +89,7 @@ workload_env := {
     "CVN_SWITCH_COLLECT_CMD=nvattest collect-evidence --device nvswitch --format json --nonce {nonce}",
     "CVN_TLS_CERT=/dev/shm/cvn-tls/node.pem",
     "CVN_TLS_DIR=/dev/shm/cvn-tls",
-    "CVN_TLS_NAME=ctf.armet.ai,api.ctf.armet.ai",
+    "CVN_TLS_NAME=ctf.armet.ai",
     "CVN_TP_SIZE=8",
     "CVN_WEIGHTS_DIR=/weights/GLM-5.3-Flash",
     "CVN_WEIGHTS_SHA384=b52f7ca1fbb5a117e621e919b7cc21aefed0dac37fe130ed7286d23c292fd24276400f2f0836aa8767a69ebf927c35a5",
@@ -645,10 +636,40 @@ rootfs_bound if {
 # image-pull option specifically, so the option is anchored first.
 driver_options_prefix := "image_guest_pull="
 
-image_pull_option(s, key, val) if {
+# Exactly one image_guest_pull= option, or undefined -> deny. Two entries with
+# different JSON would otherwise rely on Rego function-conflict behaviour, which
+# differs between opa and regorus -- not something to depend on when the finding
+# being answered is conflicting image references.
+image_pull_opts(s) := [opt |
     some opt in object.get(s, "driver_options", [])
-    startswith(opt, driver_options_prefix)
-    contains(opt, concat("", [`"`, key, `":"`, val, `"`]))
+    startswith(opt, driver_options_prefix)]
+
+image_pull_json(s) := d if {
+    opts := image_pull_opts(s)
+    count(opts) == 1
+    blob := json.unmarshal(substring(opts[0], count(driver_options_prefix), -1))
+    # metadata if present, else the blob itself: correct for either shape.
+    d := object.get(blob, "metadata", blob)
+}
+
+image_name_keys := [
+    "io.kubernetes.cri.image-name",
+    "io.kubernetes.cri.podsandbox.image-name",
+]
+
+conflicting_image_key(d, k, val) if {
+    v := object.get(d, k, "")
+    v != ""
+    v != val
+}
+
+# Every key that names an image must be absent or agree. The old contains()
+# checked ONE key against a substring of the serialised blob, so a second key
+# naming a different image rode along beside the pinned one.
+image_pull_option(s, key, val) if {
+    d := image_pull_json(s)
+    object.get(d, key, "") == val
+    every k in image_name_keys { not conflicting_image_key(d, k, val) }
 }
 
 storage_shape_ok(s) if {
@@ -723,6 +744,21 @@ path_sane(p) if {
     not contains(p, `\\`)
 }
 
+
+# An image_guest_pull storage must name a reference THIS POLICY PINS, not merely
+# a well-shaped one. Non-image drivers (ephemeral, scsi) carry no image
+# reference and are bounded by their own regex alone.
+storage_source_ok(s) if { object.get(s, "driver", "") != "image_guest_pull" }
+storage_source_ok(s) if {
+    object.get(s, "driver", "") == "image_guest_pull"
+    some img in allowed_images
+    object.get(s, "source", "") == img
+}
+storage_source_ok(s) if {
+    object.get(s, "driver", "") == "image_guest_pull"
+    object.get(s, "source", "") == "pause"
+}
+
 storage_allowed(s) if {
     some a in allowed_storages
     object.get(s, "driver", "") == a.driver
@@ -731,6 +767,7 @@ storage_allowed(s) if {
     regex.match(a.mount_point, object.get(s, "mount_point", ""))
     regex.match(a.source, object.get(s, "source", ""))
     {o | some o in object.get(s, "options", [])} == a.options
+    storage_source_ok(s) 
 }
 
 storages_safe if {
